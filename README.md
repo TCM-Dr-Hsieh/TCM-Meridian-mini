@@ -1,0 +1,134 @@
+# TCM-Meridian-mini（杏林經緯 mini）
+
+單機、單一使用者的中醫門診輔助工具。看診時用本機麥克風錄音，系統即時產生逐字稿；醫師以四個按鈕驅動 LLM 完成**病歷書寫、問診建議、整體分析**；每次看診完整留下音訊、逐字稿、病歷 diff 過程與每次 LLM 的輸入輸出，供日後追蹤與審計。
+
+> 這是 [TCM-Meridian](https://doi.org/10.5281/zenodo.20725779) 的精簡版（沒有 ReAct 主 Agent、教授 RAG、問診助理），語音部分源自作者自己的 [voice_to_text](https://github.com/TCM-Dr-Hsieh/voice_to_text)。完整設計見 [SPEC.md](SPEC.md)。
+>
+> **免責**：僅供臨床決策支援與文件輔助，不取代醫師判斷；最終病歷、診斷與處置由醫師負責。
+
+## 安裝（全新電腦）
+
+**不需要預先安裝 conda、TCM_dev 或任何 Python 環境。** 在全新的 Windows 電腦上，雙擊 `install.cmd`（或在 PowerShell 執行 `.\setup.ps1`）即可完成全部安裝：
+
+| 步驟 | 內容 | 下載量 |
+|---|---|---|
+| 預檢 | Windows 64 位元、磁碟空間（≥ 20 GB）、NVIDIA 顯卡與驅動（≥ 570）、網路 | — |
+| Python | 自動找 Python 3.12；找不到時**經你同意**用 winget 安裝（只裝給目前使用者，不需系統管理員） | 約 25 MB |
+| `.venv` | UI 用的獨立環境（NiceGUI、httpx、SoundCard、OpenCC…） | 約 250 MB |
+| `.venv-asr` | **獨立的** ASR 環境，含 `torch 2.7.1+cu128` 與 Qwen3-ASR 相依套件（94 個固定版本，不借用任何其他環境） | 約 4 GB（其中 torch 3.3 GB） |
+| 模型 | 從 Hugging Face 下載 `Qwen/Qwen3-ASR-1.7B` 與 `Qwen/Qwen3-ForcedAligner-0.6B`（固定 commit、Apache-2.0、不需登入）到 `models\` | 約 6.1 GB |
+| 設定 | 寫入 `config.json`（模型路徑用相對路徑，整個資料夾可搬移） | — |
+| 健檢 | `tools\doctor.py`：環境、GPU、模型、麥克風、LLM 連線，並實際載入 ASR 辨識一次 | — |
+
+**需要自備**：NVIDIA 顯卡（語音辨識在 CPU 上太慢，不建議）與驅動、網路、以及一個 OpenAI 相容的 LLM 伺服器（本腳本不安裝 LLM；在「模型設定」填入網址與模型，或安裝時加參數）。
+
+```powershell
+.\setup.ps1                                  # 全部自動；可中斷後重跑，已完成的步驟會略過、下載會續傳
+.\setup.ps1 -LlmUrl http://192.168.1.10:8080/v1 -LlmModel my-model     # 順便設定 LLM
+.\setup.ps1 -HfEndpoint https://hf-mirror.com                           # 網路受限時用鏡像下載模型
+.\setup.ps1 -ModelsDir E:\models                                        # 模型放在別的磁碟
+.\setup.ps1 -SkipModels                      # 模型已另外放好：之後在「模型設定」指定資料夾
+.\setup.ps1 -Force                           # 重建 .venv 與 .venv-asr
+.\setup.ps1 -Dev                             # 另外安裝 pytest、ruff（開發用）
+```
+
+若直接執行 `.\setup.ps1` 被「執行原則」擋住，改用 `powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1`（`install.cmd` 已經這樣做）。專案路徑請盡量短（例如 `C:\tcm-mini`），避免 Windows 260 字元路徑上限。
+
+其他參數見 `Get-Help .\setup.ps1 -Detailed`。安裝記錄在 `setup.log`；任何時候都可以用 `.venv\Scripts\python.exe tools\doctor.py [--smoke]` 重新健檢。
+
+- 舊版（疊加在 conda 環境上的）`.venv-asr` 會被自動偵測並改建成獨立環境。
+- 已有模型時（例如 `D:\models`）：把路徑填在 `config.json`／模型設定，安裝腳本會沿用，不重複下載。若同時指定 `-ModelsDir`，則以 `-ModelsDir` 為準。
+- 模型版本固定在 `tools\download_models.py` 的 `MODELS`（commit SHA），逐檔大小與內容雜湊（權重 SHA-256、其餘檔案 git blob 雜湊）記在 `tools\model_manifest.json`；升級時改 `MODELS` 後執行 `.venv\Scripts\python.exe tools\update_manifest.py` 重新產生（`--check` 可比對現有清單與 Hugging Face 是否一致）。
+- 沿用的既有模型若與固定版本不同（例如別的版本或檔案損毀），安裝與健檢會**警告**但不強制改用；`download_models.py --check` 會以非 0 結束。預設只比對檔案大小；要核對**每個檔案**的內容雜湊：`.venv-asr\Scripts\python.exe tools\download_models.py --check --verify`，或 `.venv\Scripts\python.exe tools\doctor.py --verify-models`。
+
+## 啟動
+
+```powershell
+.\start.cmd                 # 或 .venv\Scripts\python.exe app.py --open
+```
+
+預設監聽 `0.0.0.0:5050`（所有網路介面）：本機開 <http://127.0.0.1:5050/>，同一區網的其他裝置開 `http://<這台電腦的區網 IP>:5050/`（在 PowerShell 用 `ipconfig` 查 IPv4 位址）。環境變數 `MINI_PORT` 改埠；`MINI_HOST=127.0.0.1` 改回「只有這台電腦能連」（例如 `set MINI_HOST=127.0.0.1` 後再執行 `start.cmd`）。安裝時已產生 `config.json`（含 API Key，已 gitignore）；模板的工作副本在第一次啟動時由 `templates/defaults/` 複製。
+
+### 分享給區網或 Cloudflare
+
+- **Windows 防火牆**：第一次以 `0.0.0.0` 啟動，Windows 會詢問是否允許 Python 通過防火牆；區網分享請只勾「私人網路」，不要勾「公用網路」。
+- **錄音永遠在執行程式的這台電腦**：用手機或其他電腦開網頁，只是遠端操作畫面，不需要麥克風，音訊也不會經過那些裝置。
+- **Cloudflare**：`cloudflared tunnel --url http://localhost:5050` 會給一個 `https://….trycloudflare.com` 的臨時網址。要固定網址或限制誰能開，請用有名稱的通道加 Cloudflare Access。走 HTTPS 時瀏覽器的複製功能直接可用；區網的 `http://` 網址不是「安全環境」，程式會自動改用相容的複製方式。
+- **⚠️ 這個程式沒有登入功能，請先想清楚誰能連上**：看診狀態是全域單例，每個連上網址的人看到的都是同一位患者、同一份逐字稿與病歷，都能按「開始看診」「結束並存檔」「病歷書寫」並修改模型設定；設定視窗的 API Key 欄位只是遮蔽顯示，按眼睛圖示就看得到。兩個人同時操作同一個看診，後一個操作會直接改到同一份資料。因此：區網分享請只在你信任的網路；**Cloudflare 的公開網址務必加上 Cloudflare Access（或其他驗證）再使用，不要把沒有驗證的網址傳給不該看到病患資料的人**。
+
+## 使用流程
+
+1. **患者匯入**：貼上患者基本資料，可含上次病歷。匯入後系統會在背景預載 ASR。
+2. **開始看診**：開始錄音與即時逐字稿（右欄）。三個 agent 按鈕此時才可用。
+3. **病歷書寫**：寫病歷 agent 依逐字稿＋匯入資料＋模板＋病歷修改 diff 過程（與原版相同，讓它知道既有內容如何形成、哪些是醫師手動修改；幻覺修正 agent 也會收到），用「行級修改」更新今日病歷；幻覺修正 agent 審查，**累積 n 次通過**才寫入（n=0＝不審查）。審查不過會把意見丟回重寫；超過最大輪數則**不寫入**。
+4. **問診建議**：依「患者匯入資料＋最新今日病歷」產生西醫鑑別、中醫證型鑑別與建議問診問題（中欄，可用 ◀ ▶ 檢視每一則）。
+5. **整體分析**：教授甲、乙各自獨立寫 A&T → 互評 → 教授丙仲裁，產生最終 A&T（左下，可 ◀ ▶ 檢視；「教授過程」可看每位教授的內容）。
+6. **結束並存檔**：停止錄音，等逐字稿處理完，寫入所有檔案後退出患者。
+
+今日病歷支援瀏覽／差異／修改、undo／redo；從舊版本回滾後再修改或再書寫，會截斷後續版本並把被截斷的版本寫入稽核。醫師手動修改的行會自動標 `[醫師手動]`。`轉簡體／轉繁體` 只改變畫面顯示，不影響儲存內容與送給 LLM 的內容。
+
+作業（病歷書寫、問診建議、整體分析）進行中，患者匯入、病歷修改與其他作業鈕會鎖定，避免結果用到過期的資料。「結束並存檔」若中途失敗（例如磁碟已滿），資料保留、畫面顯示原因，排除後可再按一次重試。
+
+### 來源標籤
+
+病歷每個臨床事實句尾標註來源：`[語音#N]`（逐字稿第 N 段）、`[醫師手動]`、`[歷史]`（患者匯入資料）。瀏覽模式預設隱藏標籤；「複製」會去掉標籤，方便貼進下次看診的患者匯入。
+
+與原版 TCM-Meridian 一樣，**程式不檢查 AI 寫的來源標籤**：程式只做兩件事——醫師手動修改後自動補 `[醫師手動]`、瀏覽與複製時隱藏標籤；標籤是否正確（引用的語音段是否存在、有沒有漏標、有沒有偽造 `[醫師手動]`）交給 prompt 與幻覺修正審查員（LLM）。醫師輸入的行若與較新的語音內容不符，AI 可以改寫，但要保留 `[醫師手動]` 並在後面補上新來源，例如 `辛.9- 大便：偏乾，兩天一次[醫師手動][語音#8]`。注意 **n=0（不審查）時完全沒有任何標籤檢查**，只驗證行級操作的格式。
+
+## 存檔內容
+
+每次看診一個資料夾 `visits/日期-001`、`日期-002`…（開始看診時建立，邊跑邊寫）：
+
+```text
+audio.wav                 整段看診連續音訊
+transcript.json / .txt    逐字稿（含時間軸、ASR 簡體原稿、校稿前後、缺漏標記）
+transcript_llm.jsonl      逐字稿校稿每次呼叫的完整輸入輸出
+patient_input.json / .txt 患者匯入資料（含看診中的修改版本）
+note/history.json、diff.md 今日病歷所有版本、被截斷版本、diff 過程與每次 LLM 呼叫
+advice/NNN.json / .md     每則問診建議（含 LLM 完整輸入）
+analysis/NNN.json / .md   每則整體分析（五次呼叫的完整輸入輸出；手動修改版本亦在此）
+今日病歷.md、分析與處置.md  最終版（病歷保留來源標籤）
+log.jsonl / log.md        依時間排序的完整行為 log（含音訊時間 t+mm:ss）
+meta.json                 看診 id、起訖、狀態、設定快照（不含金鑰）
+```
+
+應用程式非正常結束時資料夾保留至最後一次寫入；可用 `tools/rebuild_log_md.py <資料夾>` 重建 `log.md`。
+
+## 設定
+
+「模型設定」與「模板設定」只能在**看診外**變更。七個 LLM 接口（逐字稿校稿、病歷書寫、幻覺修正、問診建議、教授甲／乙／丙）各自獨立，預設都指向 `http://100.85.255.46:8080/v1`（`qwen3.8-27b`）；另可設定 LLM 並行上限（預設 2，使用者觸發的作業優先於逐字稿校稿）、逾時、失敗重試次數（預設 3）、審查 n 與最大輪數、教授名稱與風格、麥克風、視窗與重疊（預設 6 秒／3 秒）、專有詞、模型資料夾（預設 `models\`）。
+
+每個 LLM 接口另有「context 上限」（預設 125000 tokens，0＝不檢查）：送出前會估算提示詞長度，超過就**立即失敗並說明原因**，而不是把超長內容送去伺服器。LLM 伺服器通常不會告知真正的 context 大小，請依你的模型實際值設定。
+
+模板：`templates/record_template.txt`（病歷）與 `analysis_template.txt`（分析）。整體分析的輸出必須涵蓋分析模板的每個編號項目（且各有內容），否則自動重試。預設值在 `templates/defaults/`，設定視窗可還原；留空代表自由發揮。Prompt 位於 `prompts/`；寫病歷與幻覺修正兩份 prompt 共用的「七大醫療狀態」與「八大類幻覺」定義在 `shared_clinical_status.txt`、`shared_hallucination_categories.txt`，修改一處兩邊同步生效。
+
+## 授權
+
+Copyright 2026 Hong-Wen Hsieh。本專案以 Apache License 2.0 授權，見 [LICENSE](LICENSE)；衍生與第三方元件的說明見 [NOTICE](NOTICE)。患者資料、看診紀錄與模型權重不屬於本授權的範圍；散布前請確認第三方套件與模型各自的授權。
+
+## 隱私
+
+患者匯入資料與逐字稿會送到你設定的 LLM 端點；匯入文字是自由文字，系統無法可靠去識別化。請使用你信任的本機或內網端點。`config.json`、`visits/` 已加入 `.gitignore`。
+
+## 開發
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q          # 單元／整合測試（假 LLM、假 ASR、假麥克風）
+.venv\Scripts\python.exe -m ruff check mini tests tools app.py conftest.py       # 靜態檢查（setup.ps1 -Dev 會安裝 ruff）
+.venv\Scripts\python.exe tools\check_agents.py --keep   # 用真模型端到端跑一遍（只送合成對話）
+.venv\Scripts\python.exe tools\fake_llm_server.py       # 開發用假 LLM（讓整個 UI 不依賴真模型）
+.venv\Scripts\python.exe tools\doctor.py --smoke        # 環境健檢（含實際載入 ASR 辨識一次）
+.venv-asr\Scripts\python.exe tools\download_models.py --check   # 只檢查模型是否完整
+```
+
+沒有麥克風時可設 `MINI_FAKE_AUDIO=<音檔>`（與選用的 `MINI_FAKE_AUDIO_SPEED=2`）讓「開始看診」重播音檔，走真實 ASR 路徑。
+
+```text
+mini/config.py        設定與驗證           mini/state.py     應用狀態機（無患者→已匯入→看診中）
+mini/visit.py         一次看診的所有狀態與稽核  mini/jobs.py      單一槽位的作業管理
+mini/llm/             用戶端、優先權排程、重試與完整記錄
+mini/voice/           麥克風、視窗、ASR、對齊、校稿、逐字稿管線
+mini/record/          行級修改、來源標籤（自動補標、隱藏）、版本歷史、diff
+mini/agents/          病歷書寫＋審查、問診建議、三教授整體分析
+mini/ui/              NiceGUI 頁面與對話框
+```

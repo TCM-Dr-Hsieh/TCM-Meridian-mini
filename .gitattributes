@@ -1,0 +1,13 @@
+# Keep the working tree identical on every machine: LF everywhere, except Windows batch files.
+# (prompts/ and templates/ are sent to the LLM as-is, so their line endings should not drift per machine.)
+* text=auto eol=lf
+*.cmd text eol=crlf
+
+# setup.ps1 must keep its UTF-8 BOM (Windows PowerShell 5.1 needs it to read the Chinese text); git preserves it.
+*.ps1 text eol=lf
+
+# Never touch binary files.
+*.wav binary
+*.png binary
+*.jpg binary
+*.ico binary

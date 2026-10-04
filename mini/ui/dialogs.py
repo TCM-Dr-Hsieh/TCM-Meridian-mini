@@ -1,0 +1,308 @@
+"""Dialogs: patient import, model settings, template settings, professor process viewer."""
+from __future__ import annotations
+
+import asyncio
+import os
+from copy import deepcopy
+
+from nicegui import ui
+
+from ..config import AGENT_KEYS, AGENT_LABELS, MAX_VOCABULARY_CHARS, Endpoint, Settings
+from ..state import AppState, StateError, TEMPLATE_LABELS
+from ..voice.asr import validate_model_dir
+
+
+# ---------------------------------------------------------------------------
+# patient import
+# ---------------------------------------------------------------------------
+def open_patient_dialog(app: AppState):
+    visiting = app.phase == 'visiting'
+    dialog = ui.dialog().props('persistent')
+    with dialog, ui.card().classes('w-[760px] max-w-full gap-3'):
+        ui.label('患者匯入').classes('text-xl font-semibold')
+        ui.label('貼上患者基本資料；可包含上次就診的病歷（舊病歷的來源標籤只當歷史資料，不會被當成本次逐字稿）。'
+                 + ('看診中修改會留下版本與 log。' if visiting else '')).classes('hint')
+        area = ui.textarea(value=app.patient_text, placeholder='例：王○○，男，45歲。高血壓病史 5 年…') \
+            .props('outlined input-style="height:340px"').classes('w-full')
+        error = ui.label('').classes('text-red-700 text-sm')
+
+        def ok():
+            try:
+                app.import_patient(area.value or '')
+            except StateError as exc:
+                error.set_text(str(exc))
+                return
+            dialog.close()
+            ui.notify('已儲存患者資料。' if visiting else '患者資料已匯入，可以開始看診。', type='positive')
+
+        def clear():
+            try:
+                app.clear_patient()
+            except StateError as exc:
+                error.set_text(str(exc))
+                return
+            dialog.close()
+            ui.notify('已清除患者。')
+
+        with ui.row().classes('w-full justify-end'):
+            ui.button('取消', on_click=dialog.close).props('flat')
+            if app.phase == 'imported':
+                ui.button('清除患者', on_click=clear).props('flat color=negative')
+            ui.button('儲存修改' if visiting else '確定', on_click=ok)
+    dialog.open()
+
+
+# ---------------------------------------------------------------------------
+# templates
+# ---------------------------------------------------------------------------
+def open_template_dialog(app: AppState):
+    if app.phase == 'visiting':
+        ui.notify('看診中不可變更模板。', type='warning')
+        return
+    areas: dict[str, ui.textarea] = {}
+    dialog = ui.dialog().props('persistent')
+    with dialog, ui.card().classes('w-[860px] max-w-full gap-3'):
+        ui.label('模板設定').classes('text-xl font-semibold')
+        ui.label('病歷模板決定寫病歷 agent 的輸出格式；分析模板決定整體分析的 A&T 格式。留空代表自由發揮。').classes('hint')
+        with ui.tabs().classes('w-full') as tabs:
+            tab_objs = {kind: ui.tab(label) for kind, label in TEMPLATE_LABELS.items()}
+        with ui.tab_panels(tabs, value=tab_objs['record']).classes('w-full'):
+            for kind in TEMPLATE_LABELS:
+                with ui.tab_panel(tab_objs[kind]).classes('p-0 gap-2'):
+                    areas[kind] = ui.textarea(value=app.get_template(kind)) \
+                        .props('outlined input-style="height:420px; font-family:Consolas,monospace"').classes('w-full')
+
+                    def restore(k=kind):
+                        areas[k].set_value(app.default_template(k))
+                        ui.notify('已載入預設內容，按「儲存」才會生效。')
+
+                    ui.button('還原預設', on_click=restore).props('flat')
+        error = ui.label('').classes('text-red-700 text-sm')
+
+        def save():
+            try:
+                for kind, area in areas.items():
+                    app.save_template(kind, area.value or '')
+            except (StateError, OSError) as exc:
+                error.set_text(str(exc))
+                return
+            dialog.close()
+            ui.notify('模板已儲存。', type='positive')
+
+        with ui.row().classes('w-full justify-end'):
+            ui.button('取消', on_click=dialog.close).props('flat')
+            ui.button('儲存', on_click=save)
+    dialog.open()
+
+
+# ---------------------------------------------------------------------------
+# professor process viewer
+# ---------------------------------------------------------------------------
+def open_process_dialog(app: AppState):
+    visit = app.visit
+    if visit is None or not (0 <= visit.analysis_index < len(visit.analysis)):
+        ui.notify('目前沒有可檢視的整體分析。', type='warning')
+        return
+    version = visit.analysis[visit.analysis_index]
+    dialog = ui.dialog()
+    with dialog, ui.card().classes('w-[900px] max-w-full h-[80vh] gap-2'):
+        ui.label(f'教授過程 · 整體分析第 {version.index} 則').classes('text-xl font-semibold')
+        if version.source != 'llm':
+            ui.label('此版本為醫師手動修改' + (f'，依據第 {version.parent} 則。' if version.parent else '。')) \
+                .classes('hint')
+            if version.parent:
+                def jump():
+                    visit.set_analysis_index(version.parent - 1)
+                    dialog.close()
+                    open_process_dialog(app)
+                ui.button(f'檢視第 {version.parent} 則的教授過程', on_click=jump).props('outline')
+        else:
+            n = version.names or {}
+            pieces = [('仲裁說明', version.arbitration_notes),
+                      (n.get('a', '教授甲'), version.professors.get('a', '')),
+                      (n.get('b', '教授乙'), version.professors.get('b', '')),
+                      (f'{n.get("a", "教授甲")}評{n.get("b", "教授乙")}', version.professors.get('review_a_on_b', '')),
+                      (f'{n.get("b", "教授乙")}評{n.get("a", "教授甲")}', version.professors.get('review_b_on_a', ''))]
+            with ui.tabs().classes('w-full') as tabs:
+                tab_list = [ui.tab(title) for title, _ in pieces]
+            with ui.tab_panels(tabs, value=tab_list[0]).classes('w-full grow overflow-auto'):
+                for tab, (_, text) in zip(tab_list, pieces):
+                    with ui.tab_panel(tab):
+                        ui.markdown(app.display(text) or '（無內容）', extras=['fenced-code-blocks', 'tables'])
+        with ui.row().classes('w-full justify-end'):
+            ui.button('關閉', on_click=dialog.close)
+    dialog.open()
+
+
+# ---------------------------------------------------------------------------
+# model settings
+# ---------------------------------------------------------------------------
+def open_settings_dialog(app: AppState):
+    if app.phase == 'visiting':
+        ui.notify('看診中不可變更設定。', type='warning')
+        return
+    draft: Settings = deepcopy(app.settings)
+    dialog = ui.dialog().props('persistent')
+    with dialog, ui.card().classes('w-[1100px] max-w-full gap-3'):
+        ui.label('模型與設定').classes('text-xl font-semibold')
+        with ui.tabs().classes('w-full') as tabs:
+            t_asr, t_llm, t_review, t_prof, t_general = (ui.tab(x) for x in
+                                                         ('語音辨識', 'LLM 接口', '審查', '教授', '一般'))
+        with ui.tab_panels(tabs, value=t_asr).classes('w-full'):
+            # ---- ASR -------------------------------------------------------
+            with ui.tab_panel(t_asr).classes('gap-3 p-0'):
+                asr_dir = ui.input('ASR 模型資料夾', value=draft.asr.asr_model_dir).classes('w-full')
+                aligner_dir = ui.input('ForcedAligner 模型資料夾', value=draft.asr.aligner_model_dir).classes('w-full')
+                python_path = ui.input('ASR Python 路徑（留空＝專案內 .venv-asr）', value=draft.asr.python_path) \
+                    .classes('w-full')
+                with ui.row().classes('w-full gap-3'):
+                    device = ui.select({'auto': '自動（優先 CUDA）', 'cuda': 'NVIDIA GPU（CUDA）', 'cpu': 'CPU'},
+                                       value=draft.asr.device, label='運算裝置').classes('w-56')
+                    mic = ui.select({'': '系統預設麥克風'}, value=draft.asr.microphone_id, label='麥克風') \
+                        .classes('grow min-w-64')
+                with ui.row().classes('w-full gap-3'):
+                    window = ui.number('音訊視窗長度 L（秒）', value=draft.asr.window_seconds, min=5, max=30, step=1) \
+                        .classes('w-56')
+                    overlap = ui.number('重疊 Z（秒）', value=draft.asr.overlap_seconds, min=0, max=27, step=0.5) \
+                        .classes('w-56')
+                    context = ui.number('校稿前文長度（字）', value=draft.asr.context_chars, min=100, max=20000,
+                                        step=100).classes('w-56')
+                ui.label('每隔 L−Z 秒產生一段辨識；Z ≤ L−3。專有詞同時作為 ASR 提示與校稿參考。').classes('hint')
+                vocabulary = ui.textarea(f'專有詞（最多 {MAX_VOCABULARY_CHARS:,} 字元）', value=draft.asr.vocabulary) \
+                    .classes('w-full')
+                asr_result = ui.label('').classes('text-sm')
+                if os.environ.get('MINI_FAKE_AUDIO'):
+                    ui.label(f'⚠ 開發模式：音訊來源為檔案 {os.environ["MINI_FAKE_AUDIO"]}（MINI_FAKE_AUDIO）').classes(
+                        'text-amber-800 text-sm')
+
+                async def load_mics():
+                    try:
+                        from ..voice.audio import list_microphones
+                        options = await asyncio.to_thread(list_microphones)
+                        mic.set_options({'': '系統預設麥克風', **options},
+                                        value=draft.asr.microphone_id if draft.asr.microphone_id in options else '')
+                    except Exception as exc:
+                        asr_result.set_text(f'無法列出麥克風：{exc}')
+
+                async def test_load():
+                    try:
+                        trial = deepcopy(draft.asr)
+                        trial.asr_model_dir, trial.aligner_model_dir = asr_dir.value or '', aligner_dir.value or ''
+                        trial.device, trial.python_path = device.value, python_path.value or ''
+                        validate_model_dir(trial.asr_model_dir)
+                        validate_model_dir(trial.aligner_model_dir, aligner=True)
+                        asr_result.set_text('正在載入本機模型…首次載入可能需要數十秒。')
+                        info = await app.asr.load(trial)
+                        asr_result.set_text(f'ASR 與對齊模型載入成功 · {info.get("device")}')
+                    except Exception as exc:
+                        asr_result.set_text(f'載入失敗：{exc}')
+
+                ui.button('測試載入 ASR', on_click=test_load).props('outline')
+                ui.timer(0.2, load_mics, once=True)
+
+            # ---- LLM ---------------------------------------------------------
+            rows: dict[str, tuple] = {}
+            with ui.tab_panel(t_llm).classes('gap-2 p-0'):
+                ui.label('七個接口各自獨立；「全部套用同一組」只複製第一列的網址、金鑰與模型名稱。'
+                         '「context 上限」是模型一次能處理的 tokens（輸入＋輸出），伺服器通常不會回報，請填實際值；'
+                         '提示詞太長時會事先明確失敗，0＝不檢查。').classes('hint')
+                with ui.grid(columns='120px 2fr 1.2fr 1.6fr 90px 100px 110px 70px').classes('w-full items-center gap-x-2 gap-y-1'):
+                    for head in ('接口', 'API URL', 'API Key', '模型名稱', 'temperature', 'max_tokens', 'context 上限', ''):
+                        ui.label(head).classes('text-xs font-semibold')
+                    for key in AGENT_KEYS:
+                        endpoint = draft.agents[key]
+                        ui.label(AGENT_LABELS[key]).classes('text-sm')
+                        url = ui.input(value=endpoint.api_url).props('dense outlined')
+                        secret = ui.input(value=endpoint.api_key, password=True, password_toggle_button=True) \
+                            .props('dense outlined')
+                        model = ui.input(value=endpoint.model_name).props('dense outlined')
+                        temp = ui.number(value=endpoint.temperature, min=0, max=2, step=0.1).props('dense outlined')
+                        tokens = ui.number(value=endpoint.max_tokens, min=0, step=500).props('dense outlined')
+                        context_limit = ui.number(value=endpoint.context_tokens, min=0, step=1024).props('dense outlined')
+                        rows[key] = (url, secret, model, temp, tokens, context_limit)
+
+                        async def test(k=key):
+                            u, s, m, t, x, _c = rows[k]
+                            try:
+                                ep = Endpoint(u.value or '', s.value or '', m.value or '', t.value or 0, int(x.value or 0))
+                                ep.validate(AGENT_LABELS[k])
+                                names = await app.client.models(ep)
+                                known = '，且找到此模型' if ep.model_name in names else f'，但清單中沒有「{ep.model_name}」'
+                                llm_result.set_text(f'{AGENT_LABELS[k]}：連線成功，取得 {len(names)} 個模型{known}。')
+                            except Exception as exc:
+                                llm_result.set_text(f'{AGENT_LABELS[k]}：測試失敗：{exc}')
+
+                        ui.button('測試', on_click=test).props('dense flat')
+                llm_result = ui.label('').classes('text-sm')
+
+                def apply_all():
+                    first_url, first_key, first_model = (rows[AGENT_KEYS[0]][i].value for i in range(3))
+                    for key in AGENT_KEYS[1:]:
+                        rows[key][0].set_value(first_url)
+                        rows[key][1].set_value(first_key)
+                        rows[key][2].set_value(first_model)
+
+                ui.button('全部套用同一組', on_click=apply_all).props('outline')
+                with ui.row().classes('w-full gap-3'):
+                    concurrency = ui.number('LLM 並行上限', value=draft.llm.max_concurrency, min=1, max=32, step=1) \
+                        .classes('w-44')
+                    timeout = ui.number('單次呼叫逾時（秒）', value=draft.llm.timeout_seconds, min=5, max=1800) \
+                        .classes('w-44')
+                    retries = ui.number('失敗重試次數', value=draft.llm.retries, min=0, max=10, step=1).classes('w-44')
+
+            # ---- review --------------------------------------------------------
+            with ui.tab_panel(t_review).classes('gap-3 p-0'):
+                n_field = ui.number('審查通過次數 n（累積制）', value=draft.review.pass_required_n, min=0, max=50, step=1) \
+                    .classes('w-72')
+                rounds_field = ui.number('最大審查輪數', value=draft.review.max_review_rounds, min=1, max=50, step=1) \
+                    .classes('w-72')
+                ui.label('累積達 n 次通過才寫入病歷；超過最大輪數仍未通過則不寫入（fail-closed）。'
+                         'n = 0 代表不審查（對照組模式）：寫病歷結果在行級操作合法的前提下直接寫入（不檢查內容與來源標籤），並明確標示「未審查」。').classes('hint')
+
+            # ---- professors ----------------------------------------------------
+            with ui.tab_panel(t_prof).classes('gap-3 p-0'):
+                ui.label('教授甲、乙可設定名稱與風格（會注入 prompt 的 {name}、{role_style}）；教授丙為中立仲裁，只有名稱。') \
+                    .classes('hint')
+                prof_name, prof_style = {}, {}
+                for key, title in (('a', '教授甲'), ('b', '教授乙')):
+                    prof_name[key] = ui.input(f'{title} 名稱', value=draft.professors[key].name).classes('w-72')
+                    prof_style[key] = ui.textarea(f'{title} 風格', value=draft.professors[key].role_style).classes('w-full')
+                prof_name['c'] = ui.input('教授丙 名稱', value=draft.professors['c'].name).classes('w-72')
+
+            # ---- general ---------------------------------------------------------
+            with ui.tab_panel(t_general).classes('gap-3 p-0'):
+                visits_dir = ui.input('看診資料夾（相對路徑以專案目錄為基準）', value=draft.visits_dir).classes('w-full')
+                ui.label('設定保存於專案目錄的 config.json（含 API Key，已加入 .gitignore）。看診中此視窗鎖定。').classes('hint')
+
+        error = ui.label('').classes('text-red-700 text-sm')
+
+        def save():
+            try:
+                new = deepcopy(app.settings)
+                new.asr.asr_model_dir, new.asr.aligner_model_dir = asr_dir.value or '', aligner_dir.value or ''
+                new.asr.python_path, new.asr.device = python_path.value or '', device.value
+                new.asr.microphone_id = mic.value or ''
+                new.asr.window_seconds, new.asr.overlap_seconds = window.value, overlap.value
+                new.asr.context_chars, new.asr.vocabulary = context.value, vocabulary.value or ''
+                for key in AGENT_KEYS:
+                    u, s, m, t, x, c = rows[key]
+                    new.agents[key] = Endpoint(u.value or '', s.value or '', m.value or '', t.value, x.value, c.value)
+                new.llm.max_concurrency, new.llm.timeout_seconds, new.llm.retries = (
+                    concurrency.value, timeout.value, retries.value)
+                new.review.pass_required_n, new.review.max_review_rounds = n_field.value, rounds_field.value
+                for key in ('a', 'b', 'c'):
+                    new.professors[key].name = prof_name[key].value or ''
+                for key in ('a', 'b'):
+                    new.professors[key].role_style = prof_style[key].value or ''
+                new.visits_dir = visits_dir.value or ''
+                app.update_settings(new)
+            except (ValueError, TypeError, StateError, OSError) as exc:
+                error.set_text(str(exc))
+                return
+            dialog.close()
+            ui.notify('設定已儲存。', type='positive')
+
+        with ui.row().classes('w-full justify-end'):
+            ui.button('取消', on_click=dialog.close).props('flat')
+            ui.button('儲存設定', on_click=save)
+    dialog.open()

@@ -1,0 +1,51 @@
+TCM-Meridian-mini
+Copyright 2026 Hong-Wen Hsieh
+
+This product includes software developed by Hong-Wen Hsieh and is licensed under the
+Apache License, Version 2.0 (see the LICENSE file).
+
+Derived work
+------------
+Portions of this project are derived from TCM-Meridian
+(https://doi.org/10.5281/zenodo.20725779), Copyright 2026 Hong-Wen Hsieh, licensed under the
+Apache License, Version 2.0. The derived parts are the line-level record-edit engine, the version
+history, the source-tag and human-edit tagging logic, the diff rendering helpers, the atomic file
+writing helper, and the clinical record-keeping and hallucination-review prompt contents
+(adapted and changed for this project).
+
+Portions of the speech pipeline (mini/voice/: microphone capture and WAV writing, audio windowing,
+the ASR worker subprocess, forced-alignment mapping, text edit helpers, and the rolling transcript
+correction logic and prompt) are derived from voice_to_text
+(https://github.com/TCM-Dr-Hsieh/voice_to_text), Copyright 2026 Hong-Wen Hsieh, licensed under the
+Apache License, Version 2.0 (adapted and changed for this project).
+
+Third-party software and models (not included in this repository)
+------------------------------------------------------------------
+This repository does not contain third-party code or model weights. setup.ps1 installs
+dependencies from their own distributions (PyPI, PyTorch) and downloads models from
+Hugging Face; each remains under its own license, which you must comply with. The main
+components and the licenses declared in their package metadata at the time of writing:
+
+  NiceGUI                              MIT
+  httpx                                BSD
+  SoundCard                            BSD
+  PyAV (av)                            BSD-3-Clause
+  NumPy                                BSD-3-Clause (and others, see its distribution)
+  opencc-python-reimplemented          Apache-2.0
+  PyTorch (torch)                      BSD
+  Hugging Face transformers            Apache-2.0
+  Hugging Face huggingface_hub         Apache-2.0
+  safetensors                          Apache-2.0
+  qwen-asr                             Apache-2.0
+
+  Qwen/Qwen3-ASR-1.7B                  Apache-2.0 (model weights, downloaded at install time)
+  Qwen/Qwen3-ForcedAligner-0.6B        Apache-2.0 (model weights, downloaded at install time)
+
+The full list of installed packages is pinned in constraints.txt (UI environment) and
+requirements-asr.txt (speech-recognition environment). Review the license of each package
+before redistributing a bundled copy of an installed environment.
+
+Clinical use notice
+-------------------
+This software is a documentation and decision-support aid. It is not a medical device and does
+not replace the judgment of a qualified physician.

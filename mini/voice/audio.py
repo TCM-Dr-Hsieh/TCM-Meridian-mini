@@ -1,0 +1,235 @@
+"""Local microphone capture, fixed overlapping windows, and continuous WAV recording.
+
+Differences from voice_to_text: microphone only (plus a dev-only file replay), an unbounded
+chunk queue (recording never stops because processing is slow), and WAV headers that are
+patched about once a second so a crash leaves a playable file.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import queue
+import threading
+import time
+import wave
+from contextlib import nullcontext
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+RATE = 16000
+BLOCK = 1600
+HARDWARE_LOCK = threading.Lock()
+
+
+@dataclass
+class Chunk:
+    index: int
+    start: float
+    samples: np.ndarray
+    final: bool = True
+    reason: str = 'stop'          # 'window' = full window, more speech may follow; 'stop' = tail
+
+    @property
+    def duration(self) -> float:
+        return len(self.samples) / RATE
+
+
+class WindowChunker:
+    """Emit [0, L], [L-Z, 2L-Z], ... and one unfinished tail on flush."""
+
+    def __init__(self, window_seconds: float, overlap_seconds: float):
+        self.length = round(window_seconds * RATE)
+        self.overlap = round(overlap_seconds * RATE)
+        self.stride = self.length - self.overlap
+        self.buffer = np.empty(0, dtype=np.float32)
+        self.start_sample = 0
+        self.received_samples = 0
+        self.last_emitted_end = 0
+        self.index = 0
+
+    def feed(self, samples):
+        incoming = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if not len(incoming):
+            return
+        self.received_samples += len(incoming)
+        self.buffer = np.concatenate((self.buffer, incoming))
+        while len(self.buffer) >= self.length:
+            end = self.start_sample + self.length
+            yield Chunk(self.index, self.start_sample / RATE, self.buffer[:self.length].copy(), True, 'window')
+            self.index += 1
+            self.last_emitted_end = end
+            self.buffer = self.buffer[self.stride:].copy()
+            self.start_sample += self.stride
+
+    def flush(self):
+        if self.received_samples <= self.last_emitted_end or not len(self.buffer):
+            return None
+        chunk = Chunk(self.index, self.start_sample / RATE, self.buffer.copy(), True, 'stop')
+        self.last_emitted_end = self.received_samples
+        self.buffer = np.empty(0, dtype=np.float32)
+        return chunk
+
+
+def list_microphones() -> dict[str, str]:
+    import soundcard as sc
+    return {d.id: d.name for d in sc.all_microphones(include_loopback=False)}
+
+
+def mic_iterator(device_id: str, stop: threading.Event):
+    import soundcard as sc
+    if not HARDWARE_LOCK.acquire(blocking=False):
+        raise RuntimeError('已有其他程式或視窗正在使用錄音裝置。')
+    try:
+        mic = sc.get_microphone(id=device_id, include_loopback=False) if device_id else sc.default_microphone()
+        # SoundCard's WASAPI backend has a known single-channel capture issue:
+        # request all physical channels, then downmix explicitly.
+        with mic.recorder(samplerate=RATE, channels=None, blocksize=BLOCK) as recorder:
+            while not stop.is_set():
+                samples = recorder.record(numframes=BLOCK)
+                yield samples.mean(axis=1).astype(np.float32)
+    finally:
+        HARDWARE_LOCK.release()
+
+
+def file_iterator(path: str, stop: threading.Event, speed: float = 1.0):
+    """Development aid: replay an audio file as if it were the microphone (paced in real time)."""
+    import av
+    with av.open(path) as container:
+        if not container.streams.audio:
+            raise ValueError('檔案沒有可讀取的音軌。')
+        resampler = av.AudioResampler(format='fltp', layout='mono', rate=RATE)
+        pending = np.empty(0, dtype=np.float32)
+
+        def frames():
+            for frame in container.decode(audio=0):
+                for converted in resampler.resample(frame):
+                    yield converted.to_ndarray().reshape(-1)
+            for converted in resampler.resample(None):
+                yield converted.to_ndarray().reshape(-1)
+
+        for samples in frames():
+            pending = np.concatenate((pending, samples))
+            while len(pending) >= BLOCK:
+                if stop.is_set():
+                    return
+                yield pending[:BLOCK].copy()
+                pending = pending[BLOCK:]
+                time.sleep(BLOCK / RATE / max(speed, 0.1))
+        if len(pending):
+            yield pending
+
+
+class AudioSource:
+    """Producer thread: iterator -> WAV file + window chunks. The queue is unbounded."""
+
+    def __init__(self, make_iterator, *, window_seconds: float, overlap_seconds: float,
+                 recording_path: Path | None):
+        self._make_iterator = make_iterator
+        self.recording_path = recording_path
+        self.chunker = WindowChunker(window_seconds, overlap_seconds)
+        self.queue: queue.Queue[Chunk] = queue.Queue()
+        self.stop = threading.Event()
+        self.cancelled = threading.Event()
+        self.done = threading.Event()
+        self.error = ''
+        self.level = 0.0
+        self.recorded_samples = 0
+        self.thread = threading.Thread(target=self._produce, daemon=True, name='audio-source')
+
+    @property
+    def audio_time(self) -> float:
+        return self.recorded_samples / RATE
+
+    def start(self):
+        self.thread.start()
+
+    def _produce(self):
+        last_patch = time.monotonic()
+        try:
+            context = wave.open(str(self.recording_path), 'wb') if self.recording_path else nullcontext()
+            with context as recording:
+                if recording is not None:
+                    recording.setnchannels(1)
+                    recording.setsampwidth(2)
+                    recording.setframerate(RATE)
+                iterator = self._make_iterator(self.stop)
+                try:
+                    for samples in iterator:
+                        if self.cancelled.is_set():
+                            break
+                        if recording is not None:
+                            recording.writeframesraw((np.clip(samples, -1, 1) * 32767).astype('<i2').tobytes())
+                            if time.monotonic() - last_patch > 1:
+                                self._patch_header(recording)
+                                last_patch = time.monotonic()
+                        self.recorded_samples += len(samples)
+                        self.level = min(1.0, float(np.sqrt(np.mean(samples ** 2))) * 5)
+                        for chunk in self.chunker.feed(samples):
+                            self.queue.put(chunk)
+                        if self.stop.is_set():
+                            break
+                finally:
+                    close = getattr(iterator, 'close', None)
+                    if close:
+                        close()
+        except Exception as exc:
+            self.error = f'音訊來源錯誤：{exc}'
+            if '0x80070005' in str(exc).lower():
+                self.error += ('\nWindows 拒絕存取錄音裝置。請確認「設定 → 隱私權與安全性 → 麥克風」'
+                               '已允許桌面應用程式存取麥克風。')
+        finally:
+            if not self.cancelled.is_set():
+                tail = self.chunker.flush()
+                if tail is not None:
+                    self.queue.put(tail)
+            self.level = 0.0
+            self.done.set()
+
+    @staticmethod
+    def _patch_header(recording):
+        """Rewrite the WAV length fields so a crash leaves a playable file (best effort)."""
+        try:
+            recording._file.flush()
+            recording._patchheader()
+        except Exception:
+            pass
+
+    async def next_chunk(self) -> Chunk | None:
+        while True:
+            try:
+                return self.queue.get_nowait()
+            except queue.Empty:
+                if self.done.is_set():
+                    try:
+                        return self.queue.get_nowait()   # recheck after the completion barrier
+                    except queue.Empty:
+                        return None
+                await asyncio.sleep(0.05)
+
+    def request_stop(self):
+        self.stop.set()
+
+    async def close(self):
+        self.cancelled.set()
+        self.stop.set()
+        if self.thread.is_alive():
+            await asyncio.to_thread(self.thread.join, 3)
+
+
+def make_source(asr_settings, recording_path: Path | None) -> AudioSource:
+    """Create the visit's audio source: the microphone, or a replayed file when MINI_FAKE_AUDIO is set."""
+    fake = os.environ.get('MINI_FAKE_AUDIO', '').strip()
+    if fake:
+        speed = float(os.environ.get('MINI_FAKE_AUDIO_SPEED', '1') or 1)
+
+        def make_iterator(stop):
+            return file_iterator(fake, stop, speed)
+    else:
+        device_id = asr_settings.microphone_id
+
+        def make_iterator(stop):
+            return mic_iterator(device_id, stop)
+    return AudioSource(make_iterator, window_seconds=asr_settings.window_seconds,
+                       overlap_seconds=asr_settings.overlap_seconds, recording_path=recording_path)

@@ -1,0 +1,23 @@
+.venv/
+.venv-asr/
+__pycache__/
+.pytest_cache/
+.pytest_tmp/
+config.json
+visits/
+data/
+*.log
+templates/record_template.txt
+templates/analysis_template.txt
+models/
+setup.log
+.ruff_cache/
+
+# secrets, editor and tool state
+.env
+.env.*
+.claude/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
