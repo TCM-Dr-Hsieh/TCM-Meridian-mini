@@ -5,7 +5,7 @@ from ..jobs import Job
 from ..llm import ValidationError
 from ..record.tags import strip_citations
 from ..textutil import extract_json
-from .common import load_prompt, patient_section, retry_builder, section
+from .common import date_section, load_prompt, patient_section, retry_builder, section
 
 PROMPT = 'prompt_ai_advice.txt'
 FIELDS = ('western_ddx', 'tcm_ddx', 'next_questions')
@@ -37,7 +37,7 @@ async def run(session, job: Job):
     session.log.emit('job_started', job_id=job.id, kind='advice', base_index=session.note.current_index + 1,
                      base_snapshot_id=note_snapshot['id'], patient_version=patient_version)
     job.set_stage('問診建議產生中')
-    user = '\n\n'.join([patient_section(session.patient_text),
+    user = '\n\n'.join([date_section(session.visit_date), patient_section(session.patient_text),
                         section('今日病歷', strip_citations(note_snapshot['note']))])
     outcome = await session.caller.call(agent='ai_advice', endpoint=session.settings.agents['ai_advice'],
                                         messages=retry_builder(load_prompt(PROMPT), user), job_id=job.id,

@@ -126,9 +126,7 @@ async def main():
               f'（模板{"本身有編號" if template_numbered else "沒有編號，不該有"}）')
         for event in session.log.events:
             if event['type'] == 'review_result':
-                print(f'  [審查第 {event["round"]} 輪] pass={event["pass"]} issues={len(event["issues"])} {event["comment"][:80]}')
-                for issue in event['issues'][:3]:
-                    print(f'      - 第{issue.get("line")}行 {issue.get("category")}：{issue.get("problem", "")[:80]}')
+                print(f'  [審查第 {event["round"]} 輪] agree={event["agree"]} {event["comment"][:120]}')
 
         banner('問診建議')
         await run_job(session, 'advice')

@@ -12,6 +12,7 @@ from .llm import LLMClient, LLMScheduler
 from .visit import VisitSession
 from .visit_store import VisitStore
 from .voice.asr import ASRError, LocalASR, validate_model_dir
+from .voice.remote import RemoteAudioSource
 
 TEMPLATE_FILES = {'record': 'record_template.txt', 'analysis': 'analysis_template.txt'}
 TEMPLATE_LABELS = {'record': '病歷模板', 'analysis': '分析模板'}
@@ -132,7 +133,17 @@ class AppState:
         self.bump()
 
     # -- visit -------------------------------------------------------------
-    async def start_visit(self) -> Path:
+    @property
+    def remote_token(self) -> str:
+        """The current visit's remote-microphone token ('' for a local-microphone visit). Only the browser that
+        started the visit is given it."""
+        source = self.visit.source if self.visit is not None else None
+        return source.token if isinstance(source, RemoteAudioSource) else ''
+
+    async def start_visit(self, *, remote: bool = False, device_label: str = '') -> Path:
+        """Start recording. `remote=True` takes the audio from the starting browser's microphone (streamed over a
+        WebSocket, see `voice/remote.py`) instead of this computer's microphone; `device_label` is the name of the
+        microphone the browser opened, kept in the audit trail."""
         if self.phase != 'imported':
             raise StateError('請先匯入患者資料。')
         if self._busy_transition:
@@ -145,12 +156,19 @@ class AppState:
                     validate_model_dir(self.settings.asr.aligner_model_dir, aligner=True)
                 except ASRError as exc:
                     raise StateError(f'ASR 設定有問題：{exc}') from exc
+            source_factory = self._source_factory
+            if remote:
+                asr = self.settings.asr
+
+                def source_factory(path):
+                    return RemoteAudioSource(window_seconds=asr.window_seconds, overlap_seconds=asr.overlap_seconds,
+                                             recording_path=path, device_label=device_label)
             store = VisitStore.allocate(self.settings.visits_path())
             visit = VisitSession(store=store, settings=self.settings, patient_text=self.patient_text,
                                  record_template=self.get_template('record'),
                                  analysis_template=self.get_template('analysis'), client=self.client,
                                  scheduler=self.scheduler, asr=self.asr, on_change=self.bump,
-                                 source_factory=self._source_factory, llm_backoff=self._llm_backoff)
+                                 source_factory=source_factory, llm_backoff=self._llm_backoff)
             try:
                 await visit.start()
             except Exception as exc:

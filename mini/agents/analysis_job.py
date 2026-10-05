@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 
 from ..jobs import Job, gather_all
 from ..llm import ValidationError
 from ..record.tags import strip_citations
 from ..textutil import content_chars
-from .common import NO_ANALYSIS_TEMPLATE, load_prompt, patient_section, render, retry_builder, section
+from .common import NO_ANALYSIS_TEMPLATE, date_section, load_prompt, patient_section, render, retry_builder, section
 
 ANALYSIS_PROMPT = 'prompt_analysis.txt'
 CROSS_PROMPT = 'prompt_cross_review.txt'
@@ -100,8 +101,9 @@ def parse_arbitration(text: str, keys: list[str] | tuple[str, ...] = ()) -> tupl
     return notes or '（模型未提供仲裁說明）', final
 
 
-def case_block(patient: str, note: str, template: str) -> str:
-    return '\n\n'.join([patient_section(patient),
+def case_block(patient: str, note: str, template: str, day: date) -> str:
+    """The 【案例資料】 body every professor call starts from (stage 1 writers, cross reviews and the arbitrator)."""
+    return '\n\n'.join([date_section(day), patient_section(patient),
                         section('今日病歷', strip_citations(note)),
                         section('分析模板', template.strip() or NO_ANALYSIS_TEMPLATE)])
 
@@ -112,7 +114,7 @@ async def run(session, job: Job):
     styles = {key: settings.professors[key].role_style.strip() or '（無特別風格要求，請維持客觀、嚴謹、臨床導向。）'
               for key in ('a', 'b')}
     note_snapshot = session.note.get_current()
-    case = case_block(session.patient_text, note_snapshot['note'], session.analysis_template)
+    case = case_block(session.patient_text, note_snapshot['note'], session.analysis_template, session.visit_date)
     keys = template_sections(session.analysis_template)
 
     def valid_at(text: str) -> str:

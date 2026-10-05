@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from nicegui import ui
@@ -16,8 +18,11 @@ from ..textutil import format_clock
 from . import dialogs
 from .style import CSS, JS
 
+REMOTE_JS = Path(__file__).with_name('remote_capture.js')     # served by app.py at REMOTE_JS_URL
+REMOTE_JS_URL = '/mini-remote-capture.js'
 EMPTY = '<span class="empty">（空白）</span>'
 BACKLOG_WARNING_WINDOWS = 10        # ~30 s of audio waiting for ASR / correction (one window per 3 s stride)
+WAIT_FOR_BROWSER_SECONDS = 15       # a remote-microphone visit whose browser has not connected after this long is flagged
 
 
 def _placeholder(text: str) -> str:
@@ -38,12 +43,28 @@ class MainPage:
     def build(self):
         ui.add_css(CSS)
         ui.add_head_html(f'<script>{JS}</script>')
+        ui.add_head_html(f'<script src="{REMOTE_JS_URL}?v=1"></script>')
+        ui.on('mini_remote', self.on_remote_event)
         ui.colors(primary='#2d6a4f', secondary='#52665d', accent='#c58d23', positive='#2e7d64')
         w = self.w
         with ui.element('div').classes('shell'):
             with ui.element('div').classes('toolbar'):
                 w.btn_import = ui.button('患者匯入', icon='person_add', on_click=lambda: dialogs.open_patient_dialog(self.app))
                 w.btn_start = ui.button('開始看診', icon='mic', on_click=self.start_visit)
+                # Remote microphone: this browser's microphone instead of the one on the computer running the program.
+                # The start button's click handler runs in the browser (a gesture is needed to open the microphone);
+                # it reports back through the 'mini_remote' event, see on_remote_event.
+                w.btn_start_remote = ui.button('開始看診', icon='mic').on(
+                    'click', js_handler='() => window.miniRemote.begin()')
+                w.src_toggle = ui.toggle({'local': '本機麥克風', 'remote': '此瀏覽器麥克風'}, value='local',
+                                         on_change=self.on_source_change) \
+                    .props('dense no-caps unelevated color=white text-color=primary toggle-color=primary '
+                           'toggle-text-color=white').classes('source-toggle') \
+                    .tooltip('本機＝執行程式的那台電腦的麥克風；此瀏覽器＝你現在使用的這台電腦的麥克風（例如透過 Cloudflare 連線時）')
+                w.mic_select = ui.select({'': '預設麥克風'}, value='', on_change=self.on_mic_change) \
+                    .props('dense outlined options-dense').classes('mic-select')
+                w.btn_mic_refresh = ui.button(icon='refresh', on_click=self.refresh_mics).props('dense flat round') \
+                    .tooltip('重新整理這台電腦的麥克風清單（瀏覽器會要求麥克風權限）')
                 w.btn_end = ui.button('結束並存檔', icon='save', on_click=self.end_visit).props('color=secondary')
                 ui.element('div').classes('spacer')
                 w.btn_simplified = ui.button('轉簡體', on_click=lambda: self.toggle_script('simplified')).props('outline')
@@ -174,6 +195,72 @@ class MainPage:
             ui.notify(str(exc), type='negative', multi_line=True)
             return
         ui.notify(f'看診開始，資料夾：{folder.name}', type='positive')
+
+    # -- remote microphone (this browser's microphone) -----------------------------------------
+    @property
+    def remote_mode(self) -> bool:
+        return self.w.src_toggle.value == 'remote'
+
+    async def on_source_change(self):
+        if self.app.phase == 'visiting':               # only the display is synced to the running visit (see update_controls)
+            self.update_controls()
+            return
+        if self.remote_mode:
+            secure = await ui.run_javascript('window.isSecureContext && !!navigator.mediaDevices', timeout=5)
+            if not secure:
+                ui.notify('這個網址不是 HTTPS，瀏覽器不會開放麥克風。請改用 https:// 網址（例如 Cloudflare），'
+                          '或在執行程式的電腦上用 localhost 開啟；否則請改選「本機麥克風」。',
+                          type='warning', multi_line=True, close_button='關閉', timeout=0)
+        self.update_controls()
+
+    def on_mic_change(self):
+        ui.run_javascript(f'window.miniRemote.deviceId = {json.dumps(self.w.mic_select.value or "")}')
+
+    async def refresh_mics(self):
+        try:
+            devices = await ui.run_javascript('window.miniRemote.listDevices(true)', timeout=60)
+        except Exception as exc:                      # permission refused, no microphone, timeout
+            ui.notify(f'無法取得這台電腦的麥克風清單：{exc}', type='warning', multi_line=True)
+            return
+        options = {'': '預設麥克風', **{d['id']: d['label'] for d in devices or []}}
+        current = self.w.mic_select.value
+        self.w.mic_select.set_options(options, value=current if current in options else '')
+        ui.notify(f'找到 {len(options) - 1} 支麥克風。', type='positive' if len(options) > 1 else 'warning')
+
+    async def on_remote_event(self, event):
+        """Reports from window.miniRemote (mini/ui/remote_capture.js)."""
+        args = event.args
+        payload = args if isinstance(args, dict) else (args[0] if args else {})
+        kind, message = payload.get('type'), payload.get('message', '')
+        if kind == 'prepared':                        # the microphone is open: start the visit and hand over the token
+            if not self.remote_mode:                  # switched back to the local microphone while the prompt was open
+                ui.run_javascript('window.miniRemote.abort()')
+                ui.notify('已切回本機麥克風，取消這次遠端麥克風的看診。', type='info')
+                return
+            await self.start_remote_visit(str(payload.get('label') or ''))
+        elif kind == 'error':
+            ui.notify(message, type='negative', multi_line=True, close_button='關閉', timeout=0)
+        elif kind == 'reconnecting':
+            ui.notify('遠端麥克風連線暫時中斷，正在重新連線（30 秒內會自動補傳）…', type='warning')
+        elif kind == 'reconnected':
+            ui.notify('遠端麥克風已重新連線，中斷期間的聲音已補傳。', type='positive')
+        elif kind == 'recording':
+            ui.notify('遠端麥克風已連線，開始錄音。', type='positive')
+
+    async def start_remote_visit(self, device_label: str = ''):
+        try:
+            task = asyncio.create_task(self.app.start_visit(remote=True, device_label=device_label))
+            folder = await asyncio.shield(task)
+        except StateError as exc:
+            ui.run_javascript('window.miniRemote.abort()')
+            ui.notify(str(exc), type='negative', multi_line=True)
+            return
+        except Exception as exc:
+            ui.run_javascript('window.miniRemote.abort()')
+            ui.notify(f'無法開始看診：{exc}', type='negative', multi_line=True)
+            return
+        ui.run_javascript(f'window.miniRemote.connect({json.dumps(self.app.remote_token)})')
+        ui.notify(f'看診開始（此瀏覽器的麥克風），資料夾：{folder.name}', type='positive')
 
     async def end_visit(self):
         if self.editing():
@@ -432,6 +519,12 @@ class MainPage:
                 parts.append(f'逐字稿：{v.pipeline.status}' + (f'（待處理 {behind}）' if behind else ''))
                 if behind >= BACKLOG_WARNING_WINDOWS:
                     parts.append(f'⚠ 逐字稿已落後約 {behind * 3} 秒（錄音與音檔不受影響；結束時需等它處理完）')
+            if v.source is not None and getattr(v.source, 'kind', '') == 'remote' and v.source.status_text:
+                parts.append(f'遠端麥克風：{v.source.status_text}')
+                if (v.source.status_text == '等待瀏覽器連線' and not v.source.done.is_set()
+                        and time.monotonic() - v.source.created_at > WAIT_FOR_BROWSER_SECONDS):
+                    parts.append('⚠ 瀏覽器一直沒有連上遠端音訊（尚未錄到任何聲音）：請按「結束並存檔」後改用本機麥克風，'
+                                 '或確認網址是 HTTPS、代理沒有改寫 Host 後重新開始')
             if v.source is not None and v.source.error:
                 parts.append(f'⚠ {v.source.error.splitlines()[0]}')
         if app.asr_status:
@@ -461,7 +554,22 @@ class MainPage:
         can_act = visiting and recording and not finishing
         # Patient data may not change while an AI job runs (its result would rest on stale data).
         w.btn_import.set_enabled(not finishing and (app.phase in ('none', 'imported') or (can_act and not busy)))
-        w.btn_start.set_enabled(app.phase == 'imported' and not finishing)
+        if visiting and v is not None and v.source is not None:
+            # A page opened (or reloaded) during a visit shows the source that visit really uses, not its own default.
+            actual = 'remote' if getattr(v.source, 'kind', 'local') == 'remote' else 'local'
+            if w.src_toggle.value != actual:
+                w.src_toggle.set_value(actual)
+        remote = self.remote_mode
+        can_start = app.phase == 'imported' and not finishing
+        w.btn_start.set_visibility(not remote)
+        w.btn_start.set_enabled(can_start)
+        w.btn_start_remote.set_visibility(remote)
+        w.btn_start_remote.set_enabled(can_start)
+        w.src_toggle.set_enabled(not visiting and not finishing)       # the source is fixed for a whole visit
+        w.mic_select.set_visibility(remote)
+        w.mic_select.set_enabled(not visiting and not finishing)
+        w.btn_mic_refresh.set_visibility(remote)
+        w.btn_mic_refresh.set_enabled(not visiting and not finishing)
         w.btn_end.set_enabled(visiting and not finishing and not editing and (recording or finish_failed))
         for name in ('btn_write', 'btn_advice', 'btn_analysis'):
             getattr(w, name).set_enabled(can_act and not busy and not editing)

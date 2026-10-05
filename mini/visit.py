@@ -5,7 +5,7 @@ import asyncio
 import time
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Callable
 
@@ -64,9 +64,12 @@ class VisitSession:
     def __init__(self, *, store: VisitStore, settings: Settings, patient_text: str, record_template: str,
                  analysis_template: str, client: LLMClient, scheduler: LLMScheduler, asr: LocalASR,
                  on_change: Callable[[], None] | None = None, source_factory: Callable | None = None,
-                 llm_backoff: float = 1.0):
+                 llm_backoff: float = 1.0, today: date | None = None):
         self.store = store
         self.visit_id = store.visit_id
+        # The visit's date, fixed when the visit starts (not per job, so it cannot change across midnight); every
+        # prompt that carries the 今日病歷 is given it.
+        self.visit_date: date = today or datetime.now().date()
         self.settings = deepcopy(settings)
         self.patient_text = patient_text
         self.record_template = record_template
@@ -146,7 +149,9 @@ class VisitSession:
         self.persist_note()
         self.source = self._source_factory(self.store.audio_path)
         self.source.start()
-        self.log.emit('mic_started', device=self.settings.asr.microphone_id or '系統預設麥克風',
+        remote = getattr(self.source, 'kind', 'local') == 'remote'
+        self.log.emit('mic_started', device=self.source.label if remote else (self.settings.asr.microphone_id or '系統預設麥克風'),
+                      audio_source='remote' if remote else 'local',
                       window_seconds=self.settings.asr.window_seconds,
                       overlap_seconds=self.settings.asr.overlap_seconds)
         self.pipeline = TranscriptPipeline(asr=self.asr, asr_settings=self.settings.asr, corrector=self.corrector,
@@ -266,6 +271,7 @@ class VisitSession:
     def _write_meta(self, status: str):
         self.store.write_json('meta.json', {
             'visit_id': self.visit_id, 'folder': str(self.store.folder), 'status': status,
+            'visit_date': self.visit_date.isoformat(),
             'started_at': self.started_at, 'ended_at': self.ended_at, 'app_version': __version__,
             'settings': self.settings.public_dict(),
             'counts': {'note_versions': len(self.note.snapshots), 'advice_versions': len(self.advice),

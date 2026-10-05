@@ -29,7 +29,8 @@ class Harness:
 def make_session(tmp_path, fake_llm):
     created: list[VisitSession] = []
 
-    async def factory(*, seconds=7, asr_text='我頭痛三天了', patient='45歲男性，高血壓病史', limit=2, **overrides):
+    async def factory(*, seconds=7, asr_text='我頭痛三天了', patient='45歲男性，高血壓病史', limit=2, today=None,
+                      **overrides):
         settings = make_settings(tmp_path)
         settings.llm.max_concurrency = limit
         for key, value in overrides.items():
@@ -42,7 +43,7 @@ def make_session(tmp_path, fake_llm):
             analysis_template='一- 西醫診斷：\n二- 中醫診斷：', client=LLMClient(fake_llm.transport()),
             scheduler=LLMScheduler(limit), asr=FakeASR(default=asr_text),
             source_factory=lambda path: silent_source(settings, seconds, recording_path=path),
-            llm_backoff=0)
+            llm_backoff=0, today=today)
         await session.start()
         await session.pipeline.wait_finished(timeout=20)
         created.append(session)

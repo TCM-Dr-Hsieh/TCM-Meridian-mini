@@ -14,8 +14,9 @@ writing helper, and the clinical record-keeping and hallucination-review prompt 
 (adapted and changed for this project).
 
 Portions of the speech pipeline (mini/voice/: microphone capture and WAV writing, audio windowing,
-the ASR worker subprocess, forced-alignment mapping, text edit helpers, and the rolling transcript
-correction logic and prompt) are derived from voice_to_text
+the ASR worker subprocess, forced-alignment mapping, text edit helpers, the rolling transcript
+correction logic and prompt, and the remote-microphone streaming protocol and browser capture script,
+mini/voice/remote.py and mini/ui/remote_capture.js) are derived from voice_to_text
 (https://github.com/TCM-Dr-Hsieh/voice_to_text), Copyright 2026 Hong-Wen Hsieh, licensed under the
 Apache License, Version 2.0 (adapted and changed for this project).
 

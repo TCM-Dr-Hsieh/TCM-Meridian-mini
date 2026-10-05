@@ -69,7 +69,8 @@ class FakeLLM:
         if role == 'writer':
             return DEFAULT_WRITER_OPS
         if role == 'reviewer':
-            return {'pass': True, 'issues': [], 'comment': 'ok'}
+            return {'thinking': '1. 遺漏檢查：無。2. A～G 檢查：無。',
+                    'agree': 'yes', 'comment': '無須修改，可直接更新病歷'}
         if role == 'advice':
             return DEFAULT_ADVICE
         if role == 'arbitration':

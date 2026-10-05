@@ -59,10 +59,11 @@ def reply(role: str, system: str, user: str) -> str:
     if role == 'reviewer':
         STATE['reviews'] += 1
         if STATE['reviews'] <= ARGS.fail_reviews:
-            return json.dumps({'pass': False, 'issues': [{'line': 1, 'category': 'G-2', 'quote': '甲- 現病史',
-                                                           'problem': '（假模型）示範退件', 'fix_hint': '重新核對'}],
-                               'comment': '示範：第一輪退件'}, ensure_ascii=False)
-        return json.dumps({'pass': True, 'issues': [], 'comment': '無須修改'}, ensure_ascii=False)
+            return json.dumps({'thinking': '1. 遺漏檢查：無。2. A～G 檢查：發現 G-2。', 'agree': 'no',
+                               'comment': 'G-2：「甲- 現病史」來源不符；（假模型）示範退件，請重新核對。'},
+                              ensure_ascii=False)
+        return json.dumps({'thinking': '1. 遺漏檢查：無。2. A～G 檢查：無。', 'agree': 'yes',
+                           'comment': '無須修改，可直接更新病歷'}, ensure_ascii=False)
     if role == 'advice':
         return json.dumps({'western_ddx': '1. 上呼吸道感染（需排除肺炎）\n2. 過敏性鼻炎',
                            'tcm_ddx': '1. 風寒束表\n2. 風熱犯肺\n   - 鑑別：咽痛、痰色',

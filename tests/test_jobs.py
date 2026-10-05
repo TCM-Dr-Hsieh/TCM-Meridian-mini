@@ -1,12 +1,18 @@
 import asyncio
+import json
+from datetime import date
 
 import pytest
 
+from mini.agents.common import date_section, format_visit_date
+from mini.agents.record_job import parse_review
 from mini.jobs import BusyError
+from mini.llm import ValidationError
 
-PASS = {'pass': True, 'issues': [], 'comment': 'ok'}
-FAIL = {'pass': False, 'issues': [{'line': 1, 'category': 'B-1', 'quote': '頭痛三天', 'problem': '逐字稿 #1 沒有',
-                                    'fix_hint': '改成未知'}], 'comment': '有問題'}
+PASS = {'thinking': '1. 遺漏檢查：無。2. A～G 檢查：無。',
+        'agree': 'yes', 'comment': '無須修改，可直接更新病歷'}
+FAIL = {'thinking': '1. 遺漏檢查：無。2. A～G 檢查：發現 B-1。', 'agree': 'no',
+        'comment': 'B-1：「頭痛三天」沒有逐字稿依據；逐字稿 #1 沒有此內容，建議改成未知。'}
 
 
 def ops(*items, summary='s'):
@@ -22,6 +28,27 @@ def replace(line, content):
 
 
 # ============================ 病歷書寫 =========================================
+def test_reviewer_schema_is_the_original_three_fields_with_strict_values():
+    parsed = parse_review(json.dumps(PASS, ensure_ascii=False))
+    assert parsed.passed and parsed.thinking.startswith('1.') and parsed.comment.startswith('無須修改')
+
+
+@pytest.mark.parametrize('bad', [
+    {'agree': 'yes', 'comment': 'ok'},
+    {'thinking': 'x', 'agree': True, 'comment': 'ok'},
+    {'thinking': 'x', 'agree': 'maybe', 'comment': 'ok'},
+    {'thinking': 'x', 'agree': 'no', 'comment': ''},
+])
+def test_reviewer_schema_rejects_missing_or_invalid_required_fields(bad):
+    with pytest.raises(ValidationError):
+        parse_review(json.dumps(bad, ensure_ascii=False))
+
+
+def test_reviewer_schema_ignores_extra_fields():
+    parsed = parse_review(json.dumps({**PASS, 'issues': [], 'pass': False}, ensure_ascii=False))
+    assert parsed.passed and parsed.thinking == PASS['thinking'] and parsed.comment == PASS['comment']
+
+
 async def test_record_job_writes_after_n_passes(make_session):
     h = await make_session()
     job = await h.run_job('record')
@@ -34,10 +61,11 @@ async def test_record_job_writes_after_n_passes(make_session):
     assert len(h.fake.calls_for('writer')) == 1 and len(h.fake.calls_for('reviewer')) == 2
     writer_user = h.fake.calls_for('writer')[0][1]['content']
     assert '[#1 ' in writer_user and '45歲男性' in writer_user and '甲- 現病史：' in writer_user   # transcript+patient+template
-    assert [e['type'] for e in s.log.events].count('review_result') == 2
+    review_events = [e for e in s.log.events if e['type'] == 'review_result']
+    assert len(review_events) == 2 and all(e['agree'] == 'yes' and e['thinking'] for e in review_events)
 
 
-async def test_review_failure_sends_issues_back_and_passes_accumulate_across_rewrites(make_session):
+async def test_review_failure_sends_comment_back_and_passes_accumulate_across_rewrites(make_session):
     h = await make_session()
     h.fake.queue('reviewer', PASS, FAIL, PASS)          # pass, fail -> rewrite, pass => 2 cumulative passes
     h.fake.queue('writer', ops(insert('甲- 現病史：頭痛[語音#1]')), ops(replace(1, '甲- 現病史：頭痛三天[語音#1]')))
@@ -46,13 +74,14 @@ async def test_review_failure_sends_issues_back_and_passes_accumulate_across_rew
     assert len(h.fake.calls_for('writer')) == 2 and len(h.fake.calls_for('reviewer')) == 3
     second_writer = h.fake.calls_for('writer')[1][1]['content']
     assert '歷次審查意見與被退件內容' in second_writer and '逐字稿 #1 沒有' in second_writer
+    assert '[第 1 次被退件的病歷內容]' in second_writer and '[第 1 次審查員修改建議]' in second_writer
     assert h.session.note.current_note() == '甲- 現病史：頭痛三天[語音#1]'
     assert h.session.note.get_current()['meta']['review']['rounds'] == 3
 
 
 async def test_a_rewrite_edits_the_version_the_reviewer_rejected_not_the_base(make_session):
-    """Original behaviour: the rewrite's 今日病歷（附行號） is the rejected version, so line numbers in the reviewer's
-    opinion match what the writer sees and an earlier fix can never be undone by the next rewrite."""
+    """Original behaviour: the rewrite's 今日病歷（附行號） is the rejected version, so the writer can locate the
+    reviewer's quoted text on the current version and an earlier fix can never be undone by the next rewrite."""
     h = await make_session()
     h.fake.queue('reviewer', FAIL, PASS, PASS)
     h.fake.queue('writer', ops(insert('甲- 現病史：頭痛[語音#1]'), insert('乙- 過去病史：高血壓[歷史]', line=2)),
@@ -74,8 +103,8 @@ async def test_every_round_of_opinions_and_every_rejected_version_goes_back_to_t
     h = await make_session()
 
     def complaint(quote, problem):
-        return {'pass': False, 'issues': [{'line': 1, 'category': 'D-1', 'quote': quote, 'problem': problem,
-                                           'fix_hint': 'x'}], 'comment': 'c'}
+        return {'thinking': f'1. 遺漏檢查：無。2. A～G 檢查：{problem}', 'agree': 'no',
+                'comment': f'D-1：「{quote}」；{problem}；建議修正。'}
 
     h.fake.queue('reviewer', complaint('無藥物/食物過敏', '意見甲：沒有區分過敏種類'), complaint('感冒3天', '意見乙：沒有診斷名稱'),
                  PASS, PASS)
@@ -88,9 +117,11 @@ async def test_every_round_of_opinions_and_every_rejected_version_goes_back_to_t
     assert '[第 1 次被退件的病歷內容' in third and '[第 2 次被退件的病歷內容' in third
     history = third[third.index('## 【歷次審查意見與被退件內容】'):]
     assert history.index('無藥物/食物過敏，感冒3天') < history.index('否認過敏，感冒3天')   # oldest first, full content each
+    assert '1 |' not in history                                                        # historical copies are unnumbered
     assert h.session.note.current_note() == '甲- 現病史：否認過敏，頭痛3天[語音#1]'      # both fixes survive
     reviewer_prompt = h.fake.calls_for('reviewer')[-1][1]['content']
-    assert '1 | 甲- 現病史：否認過敏，頭痛3天[語音#1]' in reviewer_prompt              # the whole candidate, numbered
+    assert '甲- 現病史：否認過敏，頭痛3天[語音#1]' in reviewer_prompt                  # whole candidate, unnumbered
+    assert '1 | 甲- 現病史' not in reviewer_prompt
     assert '本次修改 diff' not in reviewer_prompt                                  # ... and no "what changed" hint
     histories = {c[1]['content'][c[1]['content'].index('## 【病歷修改 diff 過程】'):
                                  c[1]['content'].index('## 【即將登載的今日病歷')] for c in h.fake.calls_for('reviewer')}
@@ -132,6 +163,17 @@ async def test_reviewer_outage_is_fail_closed(make_session):
     job = await h.run_job('record')
     assert job.status == 'failed' and h.session.note.current_index == 0
     assert len(h.fake.calls_for('writer')) == 1                    # no rewrite storm against a broken reviewer
+
+
+async def test_reviewer_validation_retry_receives_the_schema_error(make_session):
+    h = await make_session()
+    h.fake.queue('reviewer', {'pass': True, 'issues': [], 'comment': 'legacy'}, PASS)
+    job = await h.run_job('record')
+    assert job.status == 'succeeded', job.message
+    calls = h.fake.calls_for('reviewer')
+    assert len(calls) == 3                                         # invalid + retry, then the second required pass
+    assert '上一次輸出無效的原因' in calls[1][1]['content']
+    assert 'thinking' in calls[1][1]['content'] and 'agree' in calls[1][1]['content']
 
 
 async def test_transient_http_errors_are_retried(make_session):
@@ -460,13 +502,99 @@ async def test_prompts_carry_the_rules_that_shorten_review_loops(make_session):
     # writer: keep every occurrence of a fact consistent; tag all segments a fact spans (existing range/list forms)
     assert '同步檢查整份病歷中該事實的**所有位置**' in writer
     assert '標籤要涵蓋所有包含它的段落' in writer and '[語音#47-48]' in writer and '[語音#47,48]' in writer
-    # reviewer: one issue per occurrence, list everything at once; a range that includes the question is correct
-    assert '每一行都各列一筆 issue' in reviewer and '不要只列一部分' in reviewer
+    # reviewer: quote every occurrence in its free-text comment; a range that includes the question is correct
+    assert '逐一引用每一處有問題的原文' in reviewer and '不要只列一部分' in reviewer
     assert '不得因為範圍包含提問段或相鄰段就判 G-2' in reviewer
-    # both (shared definition): a compound question with one vague answer is recorded as that answer
+    # both (shared definition): a compound question with one bare yes/no is 未知 (c) 部分回答 -- recorded verbatim, the
+    # symptoms are neither all positive nor all negative; it is NOT a sub-item of 陰性 any more
     for system in (writer, reviewer):
-        assert '一問多症、一句籠統回答' in system and '照原話記錄該回答並標來源' in system
-        assert '也不可寫成「尚未詢問」（已經問過了）' in system
+        assert '**(c) 部分回答 (Partial / Unattributable Answer)**' in system
+        assert '照原話記錄醫師的提問與患者的回答並標來源' in system
+        assert '未知（僅有整體回答，待逐項確認）' in system
+        assert '不得擴寫成逐項陽性或逐項陰性' in system and '不可寫「尚未詢問」' in system
+        assert '不要自行推論答案只對應最後一個症狀' in system
+        # an explicit universal scope plus a clear confirmation is an ordinary negative; an unclear scope or a vague
+        # acknowledgement stays 未知 (c)
+        assert '**明確的全稱作用域**' in system and '「這些全部都沒有嗎？」' in system and '**清楚確認**' in system
+        assert '作用域不明（例如「有沒有胸悶、胸痛、喘？—沒有」）' in system and '只回「嗯」「喔」' in system
+        # the question already says 「這些都沒有嗎？」: answering 「沒有」 then IS a confirmation (real-model runs read it that way,
+        # as does ordinary speech); only an unclear scope or a vague acknowledgement stays 未知 (c)
+        assert '答「沒有」「都沒有」同樣是確認' in system and '對否定式問句' not in system
+        assert '逐項回答（例如「胸悶有嗎？沒有；胸痛呢？也沒有」）同樣不屬部分回答' in system
+        assert '一問多症、一句籠統回答' not in system
+    # reviewer: the (c) wording is a correct treatment, not an omission; expanding it into per-item results is the error
+    assert '未知（僅有整體回答，待逐項確認）' in reviewer.split('## 審查重點（八大類）')[0]
+    assert '**不得**因此判為 H 類遺漏' in reviewer and '擴寫成逐項「否認」屬 C-2' in reviewer
+    assert '不得要求改成未知' in reviewer and '確認含糊（「嗯」「喔」）時，寫成逐項陰性才是問題' in reviewer
+
+
+def test_visit_date_is_given_in_gregorian_and_minguo_with_the_weekday():
+    assert format_visit_date(date(2026, 10, 5)) == '2026-10-05（民國 115 年 10 月 5 日，星期一）'
+    assert format_visit_date(date(2027, 1, 1)) == '2027-01-01（民國 116 年 1 月 1 日，星期五）'
+    assert date_section(date(2026, 10, 5)) == '## 【今日看診日期】\n2026-10-05（民國 115 年 10 月 5 日，星期一）'
+
+
+async def test_every_prompt_that_carries_the_note_starts_with_todays_date(make_session):
+    """The imported records are dated in 民國 years (115/08/29) and nothing told the model what day it is. Every call
+    that is given the 今日病歷 -- writer, reviewer, advice, both professors, the cross reviews and the arbitrator --
+    leads with the visit's date (西元 + 民國 + weekday); the transcript corrector sees no note and gets none."""
+    today = date(2026, 10, 5)
+    block = date_section(today)
+    h = await make_session(today=today)
+    for kind in ('record', 'advice', 'analysis'):
+        job = await h.run_job(kind)
+        assert job.status == 'succeeded', job.message
+    for role in ('writer', 'reviewer', 'advice', 'analysis'):         # the date block is the first thing in the prompt
+        calls = h.fake.calls_for(role)
+        assert calls, role
+        assert all(call[1]['content'].startswith(block) for call in calls), role
+    for role in ('cross', 'arbitration'):                              # inside 【案例資料】
+        calls = h.fake.calls_for(role)
+        assert calls, role
+        assert all(call[1]['content'].startswith('## 【案例資料】\n' + block) for call in calls), role
+    assert all('今日看診日期' not in call[1]['content'] for call in h.fake.calls_for('corrector'))
+    for role in ('writer', 'reviewer', 'advice', 'analysis', 'cross', 'arbitration'):   # every system prompt explains it
+        assert '今日看診日期' in h.fake.calls_for(role)[0][0]['content'], role
+    meta = json.loads((h.session.store.folder / 'meta.json').read_text(encoding='utf-8'))
+    assert meta['visit_date'] == '2026-10-05'
+
+
+async def test_date_rules_keep_relative_phrases_and_forbid_invented_intervals(make_session):
+    h = await make_session()
+    await h.run_job('record')
+    writer = h.fake.calls_for('writer')[0][0]['content']
+    reviewer = h.fake.calls_for('reviewer')[0][0]['content']
+    assert '照原話記錄，不要擅自換成絕對日期' in writer and '「距今幾週」這類推算' in writer
+    assert '不是臨床事實的來源，不可用方括號標籤引用它' in writer
+    assert '不需來源標籤，不算 G-1' in reviewer and '屬 D-3 推論外顯化' in reviewer
+
+
+async def test_prompts_treat_undictated_examination_findings_as_unknown_not_as_not_yet_examined(make_session):
+    """Real visit 2026-10-05-004: the physician said 「我先把脈一下」 and never dictated or typed the pulse. The writer's own
+    example (「脈象：未知（尚未檢查）」) was rejected as contradicting #42; 「已把脈（結果待補）[語音#42]」 and 「脈診進行中」 were
+    rejected as unsupported; 「未知（尚未評估）」 was rejected again -- ten rounds, no wording could pass. Findings other than
+    the interview may be dictated OR typed later, so their absence from the transcript means 未口述, not 'not done'."""
+    h = await make_session()
+    await h.run_job('record')
+    writer = h.fake.calls_for('writer')[0][0]['content']
+    reviewer = h.fake.calls_for('reviewer')[0][0]['content']
+    for system in (writer, reviewer):                                       # shared definition
+        assert '**(d) 檢查所見未口述 (Examination Findings Not Dictated)**' in system
+        assert '逐字稿沒有這些內容，不代表沒有做' in system and '未知（未口述，待醫師輸入）' in system
+        assert '不要寫「尚未檢查」「尚未評估」，那是在斷言沒有做' in system
+        assert '不要寫成「已把脈」「脈診進行中」' in system and '推定其他項目（如舌診）也做了' in system
+        assert '匯入資料裡上次的舌象、脈象屬於歷史，不可當作今日所見' in system
+        assert '尚未蒐集該事實資料，目前逐字稿中還沒有問到。' in system and '見 (d)' in system   # (a) is interview-only now
+        assert '「尚未評估」、「尚未檢查」、「待補問」' not in system
+    assert '脈象：未知（未口述，待醫師輸入）' in writer and '脈象：未知（尚未檢查）' not in writer   # the writer's own example
+    assert '逐字稿沒有口述的，寫「未知（未口述，待醫師輸入）」' in writer
+    # reviewer: an announcement ("我先把脈一下") is not a result; neither a reason to reject nor to assume other exams were done
+    assert '**不得**判為 H 類遺漏，**不得**要求寫成已檢查或補上結果' in reviewer
+    assert '宣告不等於有結果' in reviewer and '通常舌診與脈診同時進行' in reviewer
+    assert '寫成「已把脈」「脈診進行中」或編造脈象結果才是問題' in reviewer
+    # tolerance for the old wording is stated precisely, not as a flat contradiction of the shared 「不要寫尚未檢查」
+    assert '「未知（尚未檢查）」不是首選寫法' in reviewer and '只有逐字稿明確顯示該檢查已經做完' in reviewer
+    assert '同樣不必退件' not in reviewer
 
 
 async def test_the_prompts_hold_no_numbered_label_examples_so_the_template_alone_decides_the_line_format(make_session):
@@ -510,8 +638,8 @@ async def test_the_program_does_not_check_source_tags_the_reviewer_decides(make_
 
 async def test_the_reviewer_can_reject_a_wrong_tag_and_the_writer_is_asked_to_fix_it(make_session):
     h = await make_session()
-    complaint = {'pass': False, 'issues': [{'line': 1, 'category': 'G-2', 'quote': '頭痛[語音#99]',
-                                            'problem': '逐字稿沒有第 99 段', 'fix_hint': '改成 [語音#1]'}], 'comment': 'x'}
+    complaint = {'thinking': '1. 遺漏檢查：無。2. A～G 檢查：G-2 來源不符。', 'agree': 'no',
+                 'comment': 'G-2：「頭痛[語音#99]」的來源不符；逐字稿沒有第 99 段，建議改成 [語音#1]。'}
     h.fake.queue('writer', ops(insert('甲- 現病史：頭痛[語音#99]')), ops(replace(1, '甲- 現病史：頭痛[語音#1]')))
     h.fake.queue('reviewer', complaint)
     job = await h.run_job('record')

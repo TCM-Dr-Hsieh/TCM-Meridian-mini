@@ -168,9 +168,9 @@ def summarize_event(event: dict) -> tuple[str, str | None]:
     if kind in ('job_failed', 'job_cancelled'):
         return f'作業 {event.get("job_id")} {"失敗" if kind == "job_failed" else "已取消"}：{event.get("reason", "")}', None
     if kind == 'review_result':
-        return (f'審查第 {event.get("round")} 輪：pass={event.get("pass")}；累計通過 '
+        return (f'審查第 {event.get("round")} 輪：agree={event.get("agree", "yes" if event.get("pass") else "no")}；累計通過 '
                 f'{event.get("passes")}/{event.get("required")}',
-                json.dumps(event.get('issues', []), ensure_ascii=False, indent=2) + f'\n\n{event.get("comment", "")}')
+                f'兩階段檢查：\n{event.get("thinking", "")}\n\n審查意見：\n{event.get("comment", "")}')
     if kind == 'review_skipped':
         return '⚠ 未審查（審查通過次數 n=0，對照組模式）', None
     if kind == 'writer_ops':

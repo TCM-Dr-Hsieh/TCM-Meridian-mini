@@ -1,6 +1,8 @@
 """Prompt loading and shared message-building helpers for the agents."""
 from __future__ import annotations
 
+from datetime import date
+
 from ..config import PROMPTS_DIR
 
 NO_ANALYSIS_TEMPLATE = '（無分析模板，請依常規臨床思路自由組織。）'
@@ -42,6 +44,21 @@ def section(title: str, body: str) -> str:
 
 def patient_section(text: str) -> str:
     return section('患者匯入資料（歷史資料，來源標籤 [歷史]）', text)
+
+
+_WEEKDAYS = '一二三四五六日'
+
+
+def format_visit_date(day: date) -> str:
+    """`2026-10-05（民國 115 年 10 月 5 日，星期一）`: Gregorian and Republic of China (民國) side by side, because the
+    imported records are often dated in 民國 years (e.g. `115/08/29`)."""
+    return (f'{day:%Y-%m-%d}（民國 {day.year - 1911} 年 {day.month} 月 {day.day} 日，'
+            f'星期{_WEEKDAYS[day.weekday()]}）')
+
+
+def date_section(day: date) -> str:
+    """The 【今日看診日期】 block every prompt that carries the 今日病歷 starts with."""
+    return section('今日看診日期', format_visit_date(day))
 
 
 def messages(system: str, user: str) -> list[dict]:

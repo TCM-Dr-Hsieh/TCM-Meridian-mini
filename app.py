@@ -13,9 +13,14 @@ from nicegui import ui
 
 from mini.config import server_binding
 from mini.state import AppState
-from mini.ui.page import MainPage
+from mini.ui.page import REMOTE_JS, REMOTE_JS_URL, MainPage
+from mini.voice.remote import register_routes
 
 state = AppState()
+
+# Remote microphone: the browser-side capture script and the WebSocket the audio arrives on (same origin as the page).
+ng_app.add_static_file(local_file=REMOTE_JS, url_path=REMOTE_JS_URL, max_cache_age=0)
+register_routes(ng_app)
 
 
 @ui.page('/', reconnect_timeout=60)

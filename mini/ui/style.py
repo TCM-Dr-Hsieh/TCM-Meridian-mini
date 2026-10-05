@@ -7,6 +7,8 @@ body {background:#eef2f0; color:#1f2d27; font-family:"Segoe UI","Microsoft Jheng
 .shell {height:100vh; display:flex; flex-direction:column; gap:8px; padding:10px 14px; box-sizing:border-box; width:100%;}
 .toolbar {display:flex; flex-wrap:wrap; gap:8px; align-items:center; width:100%;}
 .toolbar .spacer {flex:1 1 auto;}
+.mic-select {min-width:190px; max-width:260px;}
+.source-toggle {border:1px solid #2d6a4f; border-radius:6px; overflow:hidden;}
 .status-bar {display:flex; flex-wrap:wrap; gap:6px 16px; align-items:center; width:100%; font-size:13px;
              background:#fff; border:1px solid #d5dfda; border-radius:10px; padding:6px 12px;}
 .status-bar .job {font-weight:600; color:#1b4332;}
