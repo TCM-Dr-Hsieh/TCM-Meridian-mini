@@ -42,8 +42,11 @@ def section(title: str, body: str) -> str:
     return f'## 【{title}】\n{body.strip(chr(10)) if body.strip() else "（空白）"}'
 
 
+PATIENT_SECTION_TITLE = '患者匯入資料（歷史資料，來源標籤 [歷史]）(可能包含患者基本資料與上次就診病歷)'
+
+
 def patient_section(text: str) -> str:
-    return section('患者匯入資料（歷史資料，來源標籤 [歷史]）', text)
+    return section(PATIENT_SECTION_TITLE, text)
 
 
 _WEEKDAYS = '一二三四五六日'

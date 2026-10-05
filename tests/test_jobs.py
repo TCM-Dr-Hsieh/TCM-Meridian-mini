@@ -541,10 +541,10 @@ async def test_every_prompt_that_carries_the_note_starts_with_todays_date(make_s
     today = date(2026, 10, 5)
     block = date_section(today)
     h = await make_session(today=today)
-    for kind in ('record', 'advice', 'analysis'):
+    for kind in ('record', 'advice', 'analysis', 'deidentify'):
         job = await h.run_job(kind)
         assert job.status == 'succeeded', job.message
-    for role in ('writer', 'reviewer', 'advice', 'analysis'):         # the date block is the first thing in the prompt
+    for role in ('writer', 'reviewer', 'advice', 'analysis', 'deid'):  # the date block is the first thing in the prompt
         calls = h.fake.calls_for(role)
         assert calls, role
         assert all(call[1]['content'].startswith(block) for call in calls), role
@@ -553,10 +553,27 @@ async def test_every_prompt_that_carries_the_note_starts_with_todays_date(make_s
         assert calls, role
         assert all(call[1]['content'].startswith('## 【案例資料】\n' + block) for call in calls), role
     assert all('今日看診日期' not in call[1]['content'] for call in h.fake.calls_for('corrector'))
-    for role in ('writer', 'reviewer', 'advice', 'analysis', 'cross', 'arbitration'):   # every system prompt explains it
+    for role in ('writer', 'reviewer', 'advice', 'analysis', 'cross', 'arbitration', 'deid'):   # every system prompt explains it
         assert '今日看診日期' in h.fake.calls_for(role)[0][0]['content'], role
     meta = json.loads((h.session.store.folder / 'meta.json').read_text(encoding='utf-8'))
     assert meta['visit_date'] == '2026-10-05'
+
+
+async def test_every_llm_call_that_gets_the_patient_data_labels_it_as_basic_data_plus_the_last_visit(make_session):
+    """The imported text is free text: usually the patient's basic data and the previous visit's note. Every call that
+    carries it says so in the section title (one place: `patient_section`)."""
+    title = '## 【患者匯入資料（歷史資料，來源標籤 [歷史]）(可能包含患者基本資料與上次就診病歷)】\n'
+    h = await make_session(patient='王先生，45歲男性。上次就診：頭痛。')
+    for kind in ('record', 'advice', 'analysis', 'deidentify'):
+        job = await h.run_job(kind)
+        assert job.status == 'succeeded', job.message
+    for role in ('writer', 'reviewer', 'advice', 'analysis', 'cross', 'arbitration', 'deid'):
+        calls = h.fake.calls_for(role)
+        assert calls, role
+        for call in calls:
+            assert title + '王先生，45歲男性。上次就診：頭痛。' in call[1]['content'], role
+            assert '患者匯入資料（歷史資料，來源標籤 [歷史]）\n' not in call[1]['content'], role   # the old, bare title
+    assert all('患者匯入資料' not in call[1]['content'] for call in h.fake.calls_for('corrector'))   # the corrector never sees it
 
 
 async def test_date_rules_keep_relative_phrases_and_forbid_invented_intervals(make_session):

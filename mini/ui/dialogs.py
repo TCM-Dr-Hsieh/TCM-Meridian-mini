@@ -1,15 +1,28 @@
-"""Dialogs: patient import, model settings, template settings, professor process viewer."""
+"""Dialogs: patient import, model settings, template settings, professor process viewer, 去識別化."""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from copy import deepcopy
+from types import SimpleNamespace
 
 from nicegui import ui
 
 from ..config import AGENT_KEYS, AGENT_LABELS, MAX_VOCABULARY_CHARS, Endpoint, Settings
+from ..jobs import BusyError
 from ..state import AppState, StateError, TEMPLATE_LABELS
 from ..voice.asr import validate_model_dir
+
+
+async def copy_to_clipboard(text: str, what: str, *, caution: str = '') -> bool:
+    """Copy through the browser (window.miniCopy) and say so; `caution` turns the confirmation into a warning."""
+    ok = await ui.run_javascript(f'window.miniCopy({json.dumps(text, ensure_ascii=False)})', timeout=5)
+    if not ok:
+        ui.notify('複製失敗：瀏覽器未允許剪貼簿。', type='warning')
+        return False
+    ui.notify(f'已複製{what}。' + caution, type='warning' if caution else 'positive', multi_line=bool(caution))
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +148,117 @@ def open_process_dialog(app: AppState):
 
 
 # ---------------------------------------------------------------------------
+# LLM de-identification
+# ---------------------------------------------------------------------------
+DEID_NOTICE = ('AI 去識別化不保證完整，對外使用前請人工逐行檢查，並另行確認可對外提供的依據，以及對方服務的資料留存與'
+               '訓練政策。送進去的是可識別的原始資料，所以「模型設定」中的「去識別化」接口必須指向可信任的院內模型。')
+DEID_EXTRA_HINT = ('額外指示（選填）：每次按「去識別化」都會帶上，直到你手動清除，看診結束後清空。'
+                   '例如「連職業也刪掉」「年齡改成年齡區間」。只能讓處理更嚴格，不能要求保留姓名、證號、聯絡方式或確切日期。')
+
+
+def open_deid_dialog(app: AppState):
+    """Browse, run again and copy the de-identified versions of the visit (today's date + patient data + today's record)."""
+    visit = app.visit
+    if visit is None or visit.phase != 'recording':
+        ui.notify('看診中才能使用 LLM 去識別化。', type='warning')
+        return
+    w = SimpleNamespace()
+    seen: list = [None]
+    dialog = ui.dialog()
+    with dialog, ui.card().classes('w-[980px] max-w-full gap-2').style('max-height:94vh; overflow:auto'):
+        with ui.row().classes('w-full items-center gap-2 no-wrap'):
+            ui.label('LLM 去識別化').classes('text-xl font-semibold')
+            w.prev = ui.button('上一則', icon='chevron_left', on_click=lambda: step(-1)) \
+                .props('dense no-caps outline').mark('deid-prev')
+            w.label = ui.label('').classes('version-label').mark('deid-label')
+            w.next = ui.button('下一則', on_click=lambda: step(1)) \
+                .props('dense no-caps outline icon-right=chevron_right').mark('deid-next')
+            ui.element('div').classes('grow')
+            w.copy = ui.button('複製', icon='content_copy', on_click=lambda: copy()).props('dense no-caps').mark('deid-copy')
+        ui.label(DEID_NOTICE).classes('hint')
+        w.warn = ui.element('div').classes('w-full text-sm text-amber-900 bg-amber-50 rounded p-2 gap-1') \
+            .mark('deid-warn')
+        w.text = ui.textarea(placeholder='（尚無結果；按「去識別化」產生）') \
+            .props('outlined readonly input-style="height:38vh; font-family:Consolas,monospace"') \
+            .classes('w-full').mark('deid-text')
+        with ui.expansion('處理說明（模型自述，不會被複製）', icon='info').classes('w-full') as w.summary_box:
+            w.summary = ui.markdown('')
+        ui.label(DEID_EXTRA_HINT).classes('hint')
+        w.extra = ui.textarea(label='額外指示', value=visit.deid_extra,
+                              on_change=lambda e: setattr(visit, 'deid_extra', e.value or '')) \
+            .props('outlined autogrow input-style="min-height:48px"') \
+            .classes('w-full').mark('deid-extra')
+        w.used = ui.label('').classes('hint')
+        with ui.row().classes('w-full items-center justify-end gap-2'):
+            w.status = ui.label('').classes('grow text-sm').mark('deid-status')
+            w.cancel = ui.button('取消作業', icon='close', on_click=lambda: visit.jobs.cancel()) \
+                .props('flat color=negative no-caps')
+            w.run = ui.button('去識別化', icon='shield', on_click=lambda: run()).props('no-caps').mark('deid-run')
+            ui.button('關閉', on_click=dialog.close).props('flat no-caps')
+
+    def current():
+        return visit.deid[visit.deid_index] if 0 <= visit.deid_index < len(visit.deid) else None
+
+    def step(delta: int):
+        visit.set_deid_index(visit.deid_index + delta)
+        refresh()
+
+    async def copy():
+        version = current()
+        if version is None:
+            return
+        caution = f'（注意：這則有 {len(version.warnings)} 項殘留提醒，請先檢查）' if version.warnings else ''
+        await copy_to_clipboard(app.display(version.text), f'去識別化病歷第 {version.index} 則', caution=caution)
+
+    def run():
+        try:
+            visit.start_job('deidentify', extra=w.extra.value or '')
+        except (BusyError, StateError) as exc:
+            ui.notify(str(exc), type='warning')
+            return
+        refresh()
+
+    def refresh():
+        if not dialog.value or app.visit is not visit:          # closed, or the visit ended meanwhile: stop polling
+            timer.cancel()
+            if dialog.value:
+                dialog.close()
+            return
+        version, job, last, busy = current(), visit.jobs.current, visit.jobs.last, visit.jobs.busy
+        failure = ''
+        if not busy and last is not None and last.kind == 'deidentify' and last.status != 'succeeded':
+            failure = f'去識別化{"失敗" if last.status == "failed" else "已取消"}：{last.message}'
+        status = f'{job.label}：{job.stage}' if busy and job is not None else failure
+        signature = (len(visit.deid), visit.deid_index, busy, status, app.script_mode, visit.phase)
+        if seen[0] == signature:
+            return
+        seen[0] = signature
+        count = len(visit.deid)
+        w.label.set_text(f'{visit.deid_index + 1}/{count} · {version.timestamp[11:19]}' if version else '0/0')
+        w.text.set_value(app.display(version.text) if version else '')
+        w.warn.clear()
+        with w.warn:
+            for warning in version.warnings if version else []:
+                ui.label('⚠ ' + warning)
+        w.warn.set_visibility(bool(version and version.warnings))
+        w.summary.set_content(app.display(version.summary) if version and version.summary else '（模型沒有提供處理說明）')
+        w.summary_box.set_visibility(version is not None)
+        w.used.set_text(f'這一則的額外指示：{version.extra_instruction}' if version and version.extra_instruction else '')
+        w.used.set_visibility(bool(version and version.extra_instruction))
+        w.status.set_text(status)
+        w.status.classes(replace='grow text-sm ' + ('text-red-700' if failure else ''))
+        w.prev.set_enabled(version is not None and visit.deid_index > 0)
+        w.next.set_enabled(version is not None and visit.deid_index < count - 1)
+        w.copy.set_enabled(version is not None)
+        w.run.set_enabled(visit.phase == 'recording' and not busy)
+        w.cancel.set_visibility(busy)
+
+    timer = ui.timer(0.3, refresh, immediate=False)
+    dialog.open()
+    refresh()
+
+
+# ---------------------------------------------------------------------------
 # model settings
 # ---------------------------------------------------------------------------
 def open_settings_dialog(app: AppState):
@@ -167,9 +291,14 @@ def open_settings_dialog(app: AppState):
                         .classes('w-56')
                     context = ui.number('校稿前文長度（字）', value=draft.asr.context_chars, min=100, max=20000,
                                         step=100).classes('w-56')
-                ui.label('每隔 L−Z 秒產生一段辨識；Z ≤ L−3。專有詞同時作為 ASR 提示與校稿參考。').classes('hint')
-                vocabulary = ui.textarea(f'專有詞（最多 {MAX_VOCABULARY_CHARS:,} 字元）', value=draft.asr.vocabulary) \
-                    .classes('w-full')
+                ui.label('每隔 L−Z 秒產生一段辨識；Z ≤ L−3。').classes('hint')
+                vocabulary = ui.textarea(f'ASR 專有詞（只給語音辨識當提示；最多 {MAX_VOCABULARY_CHARS:,} 字元）',
+                                         value=draft.asr.vocabulary).classes('w-full')
+                ui.label('校稿 LLM 專有詞只給「逐字稿校稿」的 LLM 當拼寫參考，不會送給語音辨識；校稿的每次 LLM 呼叫都會帶上它，'
+                         '詞表越長越慢，建議只放真正容易被辨識錯的詞。').classes('hint')
+                correction_vocabulary = ui.textarea(
+                    f'校稿 LLM 專有詞（只給逐字稿校稿的 LLM；最多 {MAX_VOCABULARY_CHARS:,} 字元）',
+                    value=draft.asr.correction_vocabulary).classes('w-full')
                 asr_result = ui.label('').classes('text-sm')
                 if os.environ.get('MINI_FAKE_AUDIO'):
                     ui.label(f'⚠ 開發模式：音訊來源為檔案 {os.environ["MINI_FAKE_AUDIO"]}（MINI_FAKE_AUDIO）').classes(
@@ -203,7 +332,7 @@ def open_settings_dialog(app: AppState):
             # ---- LLM ---------------------------------------------------------
             rows: dict[str, tuple] = {}
             with ui.tab_panel(t_llm).classes('gap-2 p-0'):
-                ui.label('七個接口各自獨立；「全部套用同一組」只複製第一列的網址、金鑰與模型名稱。'
+                ui.label('八個接口各自獨立；「全部套用同一組」只複製第一列的網址、金鑰與模型名稱。'
                          '「context 上限」是模型一次能處理的 tokens（輸入＋輸出），伺服器通常不會回報，請填實際值；'
                          '提示詞太長時會事先明確失敗，0＝不檢查。').classes('hint')
                 with ui.grid(columns='120px 2fr 1.2fr 1.6fr 90px 100px 110px 70px').classes('w-full items-center gap-x-2 gap-y-1'):
@@ -284,6 +413,7 @@ def open_settings_dialog(app: AppState):
                 new.asr.microphone_id = mic.value or ''
                 new.asr.window_seconds, new.asr.overlap_seconds = window.value, overlap.value
                 new.asr.context_chars, new.asr.vocabulary = context.value, vocabulary.value or ''
+                new.asr.correction_vocabulary = correction_vocabulary.value or ''
                 for key in AGENT_KEYS:
                     u, s, m, t, x, c = rows[key]
                     new.agents[key] = Endpoint(u.value or '', s.value or '', m.value or '', t.value, x.value, c.value)

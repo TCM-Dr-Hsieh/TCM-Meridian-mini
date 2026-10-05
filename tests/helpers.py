@@ -18,6 +18,7 @@ ROLE_MARKERS = [
     ('arbitration', '擔任仲裁者'),
     ('cross', '評比對方的版本'),
     ('analysis', '獨立撰寫「分析與處置」'),
+    ('deid', '病歷去識別化助理'),
 ]
 
 DEFAULT_WRITER_OPS = {'thinking': 't', 'operations': [
@@ -27,6 +28,12 @@ DEFAULT_ARBITRATION = '===ARBITRATION===\n兩位教授意見大致一致。\n===
 DEFAULT_CROSS = ('## 對方版本的優點\n- 診斷方向合理\n## 對方版本的缺點與風險\n- 無明顯安全疑慮\n'
                  '## 與我方版本的分歧\n- 實質一致\n## 建議採納與不建議採納\n- 建議採納')
 DEFAULT_ADVICE = {'western_ddx': '- 偏頭痛', 'tcm_ddx': '- 肝陽上亢', 'next_questions': '- 疼痛位置？'}
+
+
+def deid_reply(patient: str = '患者，男，45歲，高血壓病史', note: str = '甲- 現病史：患者頭痛三天', *, date: str = 'D日',
+               summary: str = '- 已刪除姓名') -> str:
+    """A well-formed reply of the de-identification model."""
+    return f'===DATE===\n{date}\n===PATIENT===\n{patient}\n===NOTE===\n{note}\n===SUMMARY===\n{summary}'
 
 
 def jdump(value) -> str:
@@ -77,6 +84,8 @@ class FakeLLM:
             return DEFAULT_ARBITRATION
         if role == 'cross':
             return DEFAULT_CROSS
+        if role == 'deid':
+            return deid_reply()
         return LONG_TEXT
 
     # -- transport --------------------------------------------------------

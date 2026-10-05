@@ -1,4 +1,4 @@
-"""Single-slot job manager: only one of record / advice / analysis runs at a time."""
+"""Single-slot job manager: only one of record / advice / analysis / deidentify runs at a time."""
 from __future__ import annotations
 
 import asyncio
@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable
 
 from .llm import CallFailed
 
-KIND_LABELS = {'record': '病歷書寫', 'advice': '問診建議', 'analysis': '整體分析'}
+KIND_LABELS = {'record': '病歷書寫', 'advice': '問診建議', 'analysis': '整體分析', 'deidentify': '去識別化'}
 
 
 class JobFailed(RuntimeError):

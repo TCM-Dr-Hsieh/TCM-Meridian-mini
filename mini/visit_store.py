@@ -188,6 +188,9 @@ def summarize_event(event: dict) -> tuple[str, str | None]:
         return f'醫師手動修改病歷 → 版本 {event.get("index")}', None
     if kind == 'advice_created':
         return f'問診建議第 {event.get("index")} 則完成', None
+    if kind == 'deid_created':
+        warnings = event.get('warnings') or 0
+        return f'去識別化第 {event.get("index")} 則完成' + (f'（{warnings} 項殘留提醒）' if warnings else ''), None
     if kind == 'analysis_stage':
         return f'整體分析階段：{event.get("stage")}', None
     if kind == 'analysis_created':

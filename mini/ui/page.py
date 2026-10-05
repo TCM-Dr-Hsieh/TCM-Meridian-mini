@@ -77,6 +77,9 @@ class MainPage:
                 w.btn_write = ui.button('病歷書寫', icon='edit_note', on_click=lambda: self.run_job('record'))
                 w.btn_advice = ui.button('問診建議', icon='lightbulb', on_click=lambda: self.run_job('advice'))
                 w.btn_analysis = ui.button('整體分析', icon='psychology', on_click=lambda: self.run_job('analysis'))
+                # Opens a window to browse and run 去識別化. It opens while another job runs too (to read earlier results);
+                # the window's own 去識別化 button waits for the single job slot.
+                w.btn_deid = ui.button('LLM 去識別化', icon='shield', on_click=self.open_deid).props('outline')
                 w.btn_cancel = ui.button('取消作業', icon='close', on_click=self.cancel_job).props('flat color=negative')
             with ui.element('div').classes('status-bar'):
                 w.status = ui.label('').classes('grow')
@@ -183,8 +186,7 @@ class MainPage:
         return None
 
     async def copy_text(self, text: str, what: str):
-        ok = await ui.run_javascript(f'window.miniCopy({json.dumps(text, ensure_ascii=False)})', timeout=5)
-        ui.notify(f'已複製{what}。' if ok else '複製失敗：瀏覽器未允許剪貼簿。', type='positive' if ok else 'warning')
+        await dialogs.copy_to_clipboard(text, what)
 
     # ------------------------------------------------------------------ actions
     async def start_visit(self):
@@ -302,6 +304,12 @@ class MainPage:
     def cancel_job(self):
         if self.visit:
             self.visit.jobs.cancel()
+
+    def open_deid(self):
+        if self.editing():
+            ui.notify('請先完成或放棄目前的修改。', type='warning')
+            return
+        dialogs.open_deid_dialog(self.app)
 
     def toggle_script(self, mode: str):
         if self.editing():
@@ -573,6 +581,7 @@ class MainPage:
         w.btn_end.set_enabled(visiting and not finishing and not editing and (recording or finish_failed))
         for name in ('btn_write', 'btn_advice', 'btn_analysis'):
             getattr(w, name).set_enabled(can_act and not busy and not editing)
+        w.btn_deid.set_enabled(can_act and not editing)
         w.btn_cancel.set_visibility(busy)
         w.btn_model.set_enabled(not visiting and not finishing)
         w.btn_template.set_enabled(not visiting and not finishing)

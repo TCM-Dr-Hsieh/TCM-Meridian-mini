@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import __version__
+from .agents.common import section
 from .config import Settings
 from .jobs import BusyError, JobManager
 from .llm import LLMCaller, LLMClient, LLMScheduler
@@ -60,6 +61,30 @@ class AnalysisVersion:
     patient_version: int = 0
 
 
+@dataclass
+class DeidVersion:
+    """One 去識別化 result: the three blocks the model returned, plus what a scan of them found."""
+    index: int
+    timestamp: str
+    t: float | None
+    date_text: str
+    patient_text: str
+    note_text: str
+    summary: str = ''                # the model's account of what it removed (for the physician, never copied)
+    warnings: list = field(default_factory=list)       # residual identifiers found by deid_check
+    extra_instruction: str = ''
+    note_snapshot_id: str = ''
+    call_ids: list = field(default_factory=list)
+    job_id: str = ''
+    patient_version: int = 0
+
+    @property
+    def text(self) -> str:
+        """What the physician copies: the three blocks under plain headings, with no source tags or provenance notes."""
+        return '\n\n'.join([section('今日看診日期', self.date_text), section('患者匯入資料', self.patient_text),
+                           section('今日病歷', self.note_text)])
+
+
 class VisitSession:
     def __init__(self, *, store: VisitStore, settings: Settings, patient_text: str, record_template: str,
                  analysis_template: str, client: LLMClient, scheduler: LLMScheduler, asr: LocalASR,
@@ -94,7 +119,7 @@ class VisitSession:
                                             logger=self._log_transcript_llm, id_prefix='t', backoff=llm_backoff)
         self.corrector = TranscriptCorrector(self._transcript_caller,
                                              lambda: self.settings.agents['transcript_corrector'],
-                                             lambda: self.settings.asr.vocabulary)
+                                             lambda: self.settings.asr.correction_vocabulary)
         self.note = SnapshotHistory()
         self.note_audit: list[dict] = []
         self.patient_versions: list[dict] = []
@@ -102,6 +127,10 @@ class VisitSession:
         self.advice_index = -1
         self.analysis: list[AnalysisVersion] = []
         self.analysis_index = -1
+        self.deid: list[DeidVersion] = []
+        self.deid_index = -1
+        # The physician's extra instruction for 去識別化: kept for the whole visit and sent with every run until cleared.
+        self.deid_extra = ''
         self.jobs = JobManager(self)
         self.phase = 'starting'          # starting | recording | finishing | finish_failed | finished
         self.finish_error = ''
@@ -232,13 +261,15 @@ class VisitSession:
         self.store.write_json('advice/index.json', {
             'displayed_index': self.advice_index + 1 if self.advice_index >= 0 else None,
             'versions': [{'index': v.index, 'timestamp': v.timestamp} for v in self.advice]})
+        if self.deid:
+            self.store.write_json('deidentified/index.json', self._deid_index_doc())
         if not self.ended_at:
             self.ended_at = _now()
         if not self._finished_logged:
             self.log.emit('visit_finished', visit_id=self.visit_id,
                           segments=len(self.pipeline.segments) if self.pipeline else 0,
                           note_versions=len(self.note.snapshots), advice_versions=len(self.advice),
-                          analysis_versions=len(self.analysis))
+                          analysis_versions=len(self.analysis), deid_versions=len(self.deid))
             self._finished_logged = True            # only once it is really in the log; a failed write is retried
         self._write_meta('finished')
         self.store.write_log_md(self.log.events)
@@ -275,7 +306,7 @@ class VisitSession:
             'started_at': self.started_at, 'ended_at': self.ended_at, 'app_version': __version__,
             'settings': self.settings.public_dict(),
             'counts': {'note_versions': len(self.note.snapshots), 'advice_versions': len(self.advice),
-                       'analysis_versions': len(self.analysis),
+                       'analysis_versions': len(self.analysis), 'deid_versions': len(self.deid),
                        'segments': len(self.pipeline.segments) if self.pipeline else 0,
                        'transcript_llm_calls': self.transcript_llm_calls}})
 
@@ -443,10 +474,46 @@ class VisitSession:
             self.store.write_json('analysis/index.json', self._analysis_index_doc())
             self.on_change()
 
+    # -- de-identification -------------------------------------------------
+    def _deid_index_doc(self) -> dict:
+        return {'displayed_index': self.deid_index + 1 if self.deid_index >= 0 else None,
+                'versions': [{'index': v.index, 'timestamp': v.timestamp, 'warnings': len(v.warnings)}
+                             for v in self.deid]}
+
+    def add_deid(self, parts: dict, warnings: list[str], extra_instruction: str, note_snapshot_id: str,
+                 call_ids: list[str], job_id: str, patient_version: int | None = None) -> DeidVersion:
+        """Append a result (earlier ones stay; the physician may run it again and browse them).
+
+        `deidentified/NNN.md` is exactly what 複製 copies: no heading, no timestamp (the real time of day is the date this
+        feature hides). The LLM input (which is the identifiable original) is in `NNN.json` under `llm_calls` and in
+        log.jsonl, like every other LLM call.
+        """
+        version = DeidVersion(len(self.deid) + 1, _now(), self.audio_t(), parts['date'], parts['patient'], parts['note'],
+                              parts.get('summary', ''), list(warnings), extra_instruction, note_snapshot_id,
+                              list(call_ids), job_id, patient_version or self.patient_version)
+        self.deid.append(version)
+        self.deid_index = len(self.deid) - 1
+        name = f'deidentified/{version.index:03d}'
+        self.store.write_json(name + '.json', {**asdict(version), 'text': version.text,
+                                               'llm_calls': [self.calls[c] for c in call_ids if c in self.calls]})
+        self.store.write_text(name + '.md', version.text + '\n')
+        self.store.write_json('deidentified/index.json', self._deid_index_doc())
+        self.log.emit('deid_created', index=version.index, job_id=job_id, call_ids=call_ids,
+                      warnings=len(version.warnings))
+        self.on_change()
+        return version
+
+    def set_deid_index(self, index: int):
+        if 0 <= index < len(self.deid):
+            self.deid_index = index
+            self.on_change()
+
     # -- jobs ------------------------------------------------------------
-    def start_job(self, kind: str):
-        from .agents import advice_job, analysis_job, record_job
-        runner = {'record': record_job.run, 'advice': advice_job.run, 'analysis': analysis_job.run}[kind]
+    def start_job(self, kind: str, **options):
+        """Start a job. `options` go to the job's runner (only 去識別化 takes one: `extra`, the physician's extra instruction)."""
+        from .agents import advice_job, analysis_job, deid_job, record_job
+        runner = {'record': record_job.run, 'advice': advice_job.run, 'analysis': analysis_job.run,
+                  'deidentify': deid_job.run}[kind]
         if self.phase != 'recording':
             raise BusyError('目前不在看診中。')
-        return self.jobs.start(kind, lambda job: runner(self, job))
+        return self.jobs.start(kind, lambda job: runner(self, job, **options))

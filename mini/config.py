@@ -46,7 +46,7 @@ DEFAULT_ASR_DIR = r'models\Qwen3-ASR-1.7B'
 DEFAULT_ALIGNER_DIR = r'models\Qwen3-ForcedAligner-0.6B'
 
 AGENT_KEYS = ('transcript_corrector', 'record_writer', 'hallucination_corrector',
-              'ai_advice', 'professor_a', 'professor_b', 'professor_c')
+              'ai_advice', 'professor_a', 'professor_b', 'professor_c', 'deidentifier')
 AGENT_LABELS = {
     'transcript_corrector': '逐字稿校稿',
     'record_writer': '病歷書寫',
@@ -55,6 +55,7 @@ AGENT_LABELS = {
     'professor_a': '教授甲',
     'professor_b': '教授乙',
     'professor_c': '教授丙（仲裁）',
+    'deidentifier': '去識別化',
 }
 # (temperature, max_tokens); max_tokens 0 means "chosen per request".
 AGENT_DEFAULTS = {
@@ -65,6 +66,7 @@ AGENT_DEFAULTS = {
     'professor_a': (0.7, 8000),
     'professor_b': (0.7, 8000),
     'professor_c': (0.3, 8000),
+    'deidentifier': (0.2, 0),        # the reply is about as long as the input: sized per request
 }
 
 DEFAULT_STYLE_A = ('你以嚴謹、保守、重視風險的風格撰寫：優先排除危險徵象與用藥禁忌；對證據不足的推論明確標示不確定，'
@@ -135,7 +137,8 @@ class ASRSettings:
     window_seconds: float = 6.0
     overlap_seconds: float = 3.0
     context_chars: int = 1000
-    vocabulary: str = ''
+    vocabulary: str = ''                  # hint for the speech recognizer only
+    correction_vocabulary: str = ''       # spelling reference for the transcript-correction LLM only
     microphone_id: str = ''
     python_path: str = ''
 
@@ -154,7 +157,9 @@ class ASRSettings:
             raise ValueError('重疊須小於等於「視窗長度 − 3」，至少保留 3 秒新音訊。')
         self.context_chars = _number(self.context_chars, '校稿前文長度', 100, 20000, integer=True)
         if len(self.vocabulary) > MAX_VOCABULARY_CHARS:
-            raise ValueError(f'專有詞最多 {MAX_VOCABULARY_CHARS} 字元。')
+            raise ValueError(f'ASR 專有詞最多 {MAX_VOCABULARY_CHARS} 字元。')
+        if len(self.correction_vocabulary) > MAX_VOCABULARY_CHARS:
+            raise ValueError(f'校稿 LLM 專有詞最多 {MAX_VOCABULARY_CHARS} 字元。')
         self.python_path = self.python_path.strip().strip('"')
 
 
@@ -232,7 +237,12 @@ class Settings:
 
         settings = cls()
         settings.llm = build(LLMSettings, data.get('llm'))
-        settings.asr = build(ASRSettings, data.get('asr'))
+        raw_asr = data.get('asr') if isinstance(data.get('asr'), dict) else {}
+        settings.asr = build(ASRSettings, raw_asr)
+        if 'correction_vocabulary' not in raw_asr:
+            # A config from before the vocabulary was split into two: the corrector used to receive the one shared list,
+            # so start it from that instead of silently taking the list away. Once saved, the two are independent.
+            settings.asr.correction_vocabulary = settings.asr.vocabulary
         settings.review = build(ReviewSettings, data.get('review'))
         agents = default_agents()
         for key, raw in (data.get('agents') or {}).items():
@@ -240,6 +250,16 @@ class Settings:
                 merged = asdict(agents[key])
                 merged.update({k: v for k, v in raw.items() if k in merged})
                 agents[key] = Endpoint(**merged)
+        raw_agents = data.get('agents') if isinstance(data.get('agents'), dict) else {}
+        if 'deidentifier' not in raw_agents and isinstance(raw_agents.get('record_writer'), dict):
+            # A config from before the 去識別化 interface existed. It receives identifiable patient data, so it must not
+            # silently fall back to the built-in default address: start it from the interface the physician already
+            # chose for writing the record (address, key, model, context window). Once saved, the two are independent.
+            writer = agents['record_writer']
+            agents['deidentifier'] = Endpoint(
+                api_url=writer.api_url, api_key=writer.api_key, model_name=writer.model_name,
+                temperature=AGENT_DEFAULTS['deidentifier'][0], max_tokens=AGENT_DEFAULTS['deidentifier'][1],
+                context_tokens=writer.context_tokens)
         settings.agents = agents
         professors = default_professors()
         for key, raw in (data.get('professors') or {}).items():
