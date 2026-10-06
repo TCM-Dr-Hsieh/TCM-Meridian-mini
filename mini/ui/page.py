@@ -34,6 +34,7 @@ class MainPage:
         self.app = app
         self.note_mode = 'browse'            # browse | diff | edit
         self.analysis_editing = False
+        self.patient_open = False            # the floating 患者資訊 panel; a reloaded page starts with it closed
         self._sigs: dict[str, object] = {}
         self.w = SimpleNamespace()
         self.build()
@@ -77,6 +78,9 @@ class MainPage:
                 w.btn_write = ui.button('病歷書寫', icon='edit_note', on_click=lambda: self.run_job('record'))
                 w.btn_advice = ui.button('問診建議', icon='lightbulb', on_click=lambda: self.run_job('advice'))
                 w.btn_analysis = ui.button('整體分析', icon='psychology', on_click=lambda: self.run_job('analysis'))
+                # A read-only, draggable reference panel for the imported patient data. It never touches the visit, so it
+                # is always available (no visit, a running job, note editing) and is not part of update_controls.
+                w.btn_patient = ui.button('患者資訊', icon='assignment_ind', on_click=self.toggle_patient).props('outline')
                 # Opens a window to browse and run 去識別化. It opens while another job runs too (to read earlier results);
                 # the window's own 去識別化 button waits for the single job slot.
                 w.btn_deid = ui.button('LLM 去識別化', icon='shield', on_click=self.open_deid).props('outline')
@@ -92,6 +96,7 @@ class MainPage:
                     self.build_advice_panel()
                 with ui.element('div').classes('work-col'):
                     self.build_transcript_panel()
+        self.build_patient_panel()
         self.render_all()
         self.update_status()
         self.update_controls()
@@ -166,6 +171,22 @@ class MainPage:
                 w.tx_info = ui.label('').classes('version-label')
             with ui.element('div').classes('panel-body') as w.tx_scroll:
                 w.tx_html = ui.html('', sanitize=False)
+
+    def build_patient_panel(self):
+        """A floating window with no backdrop (so the note behind it stays usable); dragging and resizing are done in the
+        browser, see `window.miniFloat` in style.py."""
+        w = self.w
+        with ui.element('div').classes('float-panel') as w.patient_panel:
+            with ui.element('div').classes('float-head').tooltip('拖曳標題列移動；連按兩下回到預設位置；右下角可調整大小'):
+                ui.label('患者資訊').classes('float-title')
+                ui.element('div').classes('spacer').style('flex:1 1 auto')
+                w.btn_patient_copy = ui.button(icon='content_copy', on_click=self.copy_patient) \
+                    .props('dense flat round').tooltip('複製（去來源標籤）').mark('patient-copy')
+                ui.button(icon='close', on_click=self.close_patient).props('dense flat round').tooltip('關閉') \
+                    .mark('patient-close')
+            with ui.element('div').classes('float-body'):
+                w.patient_text = ui.label('').classes('patient-text')
+        w.patient_panel.set_visibility(False)
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -305,6 +326,34 @@ class MainPage:
         if self.visit:
             self.visit.jobs.cancel()
 
+    # -- patient information (read-only reference panel) ----------------------
+    def toggle_patient(self):
+        self.set_patient_open(not self.patient_open)
+
+    def close_patient(self):
+        self.set_patient_open(False)
+
+    def set_patient_open(self, opened: bool):
+        w = self.w
+        self.patient_open = opened
+        w.patient_panel.set_visibility(opened)
+        if opened:                                    # a filled button shows that the panel is open
+            w.btn_patient.props(remove='outline')
+            self.render_patient()
+            ui.run_javascript(f"window.miniFloat.show('c{w.patient_panel.id}')")
+        else:
+            w.btn_patient.props('outline')
+
+    def patient_source(self) -> str:
+        return self.app.current_patient_text
+
+    async def copy_patient(self):
+        text = self.patient_source()
+        if not text.strip():
+            ui.notify('尚未匯入患者。', type='warning')
+            return
+        await self.copy_text(self.app.display(strip_citations(text)), '患者匯入資料（已去來源標籤）')
+
     def open_deid(self):
         if self.editing():
             ui.notify('請先完成或放棄目前的修改。', type='warning')
@@ -403,6 +452,7 @@ class MainPage:
         self._maybe('analysis', self.analysis_signature(), self.render_analysis)
         self._maybe('advice', self.advice_signature(), self.render_advice)
         self._maybe('transcript', self.transcript_signature(), self.render_transcript)
+        self._maybe('patient', self.patient_signature(), self.render_patient)
 
     def _maybe(self, name: str, signature, render):
         if self._sigs.get(name) != signature:
@@ -423,6 +473,9 @@ class MainPage:
     def advice_signature(self):
         v = self.visit
         return (id(v), v.advice_index if v else -1, len(v.advice) if v else 0, self.app.script_mode)
+
+    def patient_signature(self):
+        return (id(self.visit), self.patient_source(), self.app.script_mode)
 
     def transcript_signature(self):
         v = self.visit
@@ -479,6 +532,14 @@ class MainPage:
         w.ad_label.set_text(f'{v.advice_index + 1}/{len(v.advice)}')
         for key, md in w.advice_md.items():
             md.set_content(app.display(getattr(version, key)))
+
+    def render_patient(self):
+        w = self.w
+        text = self.patient_source()
+        empty = not text.strip()
+        w.patient_text.set_text('（尚未匯入患者）' if empty else self.app.display(strip_citations(text)))
+        w.patient_text.classes(replace='patient-text' + (' empty' if empty else ''))
+        w.btn_patient_copy.set_enabled(not empty)
 
     def render_transcript(self):
         w, v, app = self.w, self.visit, self.app

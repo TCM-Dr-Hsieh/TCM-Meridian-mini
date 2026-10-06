@@ -695,7 +695,7 @@ async def test_patient_data_cannot_be_changed_while_a_job_runs(make_session):
     from mini.state import AppState, StateError                       # the same guard the import button relies on
     h = await make_session()
     state = AppState.__new__(AppState)
-    state.phase, state.visit = 'visiting', h.session
+    state.phase, state.visit, state._busy_transition = 'visiting', h.session, False
     state.bump = lambda: None
     h.fake.delay = 0.4
     job = h.session.start_job('record')

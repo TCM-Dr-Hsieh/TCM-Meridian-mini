@@ -36,7 +36,8 @@ class AppState:
         self._source_factory = source_factory
         self._llm_backoff = llm_backoff
         self.phase = 'none'                  # none | imported | visiting
-        self.patient_text = ''
+        self.patient_revision = 0           # moved by every assignment to patient_text; see patient_stamp
+        self._patient_text = ''
         self.visit: VisitSession | None = None
         self.script_mode = 'original'
         self.asr_status = ''
@@ -89,9 +90,40 @@ class AppState:
         self.bump()
 
     # -- patient -----------------------------------------------------------
+    @property
+    def patient_text(self) -> str:
+        """The imported text before a visit (and the text a visit started with)."""
+        return self._patient_text
+
+    @patient_text.setter
+    def patient_text(self, value: str):
+        # Every assignment -- an import, a clear, the clearing when a visit ends -- moves the revision, so no path can change
+        # the text and leave the stamp as it was (a stamp that came back to an old value would let a stale window through).
+        self._patient_text = value
+        self.patient_revision += 1
+
+    @property
+    def current_patient_text(self) -> str:
+        """The imported patient data as it stands now. During a visit that is the visit's copy: editing the data in a visit
+        changes only that copy, so `patient_text` is still the text the visit started with."""
+        return self.visit.patient_text if self.visit is not None else self.patient_text
+
+    @property
+    def patient_stamp(self) -> tuple:
+        """Which patient data a window was looking at. During a visit: the visit (by identity) and its version of the data;
+        before one: the revision counter, which every import and clear moves. The state is shared by every browser tab, so
+        a window that edits the data compares the stamp it took when it opened with the current one when it saves, and
+        refuses when they differ (another tab saved or cleared, or the visit started or ended)."""
+        if self.visit is not None:
+            return (self.visit, self.visit.patient_version)
+        return (None, self.patient_revision)
+
     def import_patient(self, text: str):
         if self.phase == 'visiting':
             assert self.visit is not None
+            if self._busy_transition or self.visit.phase != 'recording':
+                # Not only the toolbar: a window another tab left open must not edit a visit that is being closed.
+                raise StateError('看診正在結束或已經結束存檔，無法再修改患者資料。')
             if self.visit.jobs.busy:
                 raise StateError('作業進行中，請等作業完成或取消後再修改患者資料（避免結果用到過期的資料）。')
             self.visit.set_patient_text(text.strip())

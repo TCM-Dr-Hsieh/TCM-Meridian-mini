@@ -1,4 +1,4 @@
-"""CSS and the small client-side helpers (copy, transcript auto-scroll)."""
+"""CSS and the small client-side helpers (copy, transcript auto-scroll, draggable floating panels)."""
 
 CSS = '''
 html, body {height:100%;}
@@ -52,6 +52,16 @@ body {background:#eef2f0; color:#1f2d27; font-family:"Segoe UI","Microsoft Jheng
 .nicegui-markdown th {background:#eaf1ed;}
 .nicegui-markdown code, .nicegui-markdown pre {white-space:pre-wrap; overflow-wrap:anywhere;}
 .nicegui-markdown ul, .nicegui-markdown ol {margin:4px 0; padding-left:22px;}
+.float-panel {position:fixed; right:24px; top:96px; width:460px; height:min(62vh, 560px); min-width:260px; min-height:140px;
+              z-index:3000; display:flex; flex-direction:column; resize:both; overflow:hidden; box-sizing:border-box;
+              background:#fff; border:1px solid #b9c9c1; border-radius:12px; box-shadow:0 8px 28px #1b433238;}
+.float-panel.dragging {user-select:none;}
+.float-head {display:flex; align-items:center; gap:6px; padding:5px 8px 5px 12px; background:#eaf1ed; cursor:move;
+             touch-action:none; user-select:none; border-bottom:1px solid #d5dfda;}
+.float-title {font-weight:700; color:#1b4332; font-size:15px;}
+.float-body {flex:1 1 0; min-height:0; overflow:auto; padding:10px 14px;}
+.patient-text {white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.75; font-size:14px; user-select:text; cursor:text;}
+.patient-text.empty {color:#9aa8a1;}
 @media (max-width: 860px) {.cols {grid-template-columns:1fr; overflow:auto;} .work-col {min-height:70vh;}}
 '''
 
@@ -88,4 +98,94 @@ window.miniCopy = async function (text) {
     return ok;
   } catch (e) { return false; }
 };
+// Floating panels (class float-panel, header float-head): no backdrop, so the page behind stays usable. The header drags
+// the panel (mouse or touch), the bottom-right corner resizes it (CSS), a double click on the header puts it back, and the
+// position and size are remembered in this browser. A panel can never be dragged out of reach: its left and top edges stay
+// inside the window, the whole header stays above the bottom edge (HEAD_H is only the fallback while the header is not
+// laid out), and at least MIN_VISIBLE px of the title end stay inside on the right while dragging. When the panel opens
+// and when the browser window shrinks, it is sized to the window and pulled fully into view, on both axes, where it fits.
+window.miniFloat = (function () {
+  const KEY = 'miniFloat:', MIN_VISIBLE = 80, HEAD_H = 40, DEFAULT_W = 460;
+  let drag = null;
+  function headOf(el) { const head = el.querySelector('.float-head'); return (head && head.offsetHeight) || HEAD_H; }
+  function place(el, left, top) {
+    // Left edge never past the window's left edge: the buttons sit at the right end of the header and are not draggable,
+    // so a panel pushed left would leave nothing to grab. On the right, the title end (the draggable part) stays in.
+    const x = Math.min(Math.max(left, 0), window.innerWidth - MIN_VISIBLE);
+    const y = Math.min(Math.max(top, 0), window.innerHeight - headOf(el));
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+    el.style.right = 'auto';
+  }
+  function save(el) {
+    try {
+      const r = el.getBoundingClientRect();
+      localStorage.setItem(KEY + el.id, JSON.stringify({left: r.left, top: r.top, width: r.width, height: r.height}));
+    } catch (e) { /* blocked storage: show() reads this page's own place and size back from the element; a reload or a double click on the header resets */ }
+  }
+  function load(id) {
+    try { return JSON.parse(localStorage.getItem(KEY + id) || 'null'); } catch (e) { return null; }
+  }
+  function visible(el) { return el.getClientRects().length > 0; }
+  function show(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    let s = load(id);
+    if (!(s && s.width > 0) && el.style.left) {    // storage blocked: keep where this page had it, but still fit it below
+      s = {left: parseFloat(el.style.left), top: parseFloat(el.style.top),
+           width: parseFloat(el.style.width) || DEFAULT_W, height: parseFloat(el.style.height) || 400};
+    }
+    if (!(s && s.width > 0)) {
+      s = {width: DEFAULT_W, height: Math.min(window.innerHeight * 0.62, 560),
+           left: window.innerWidth - DEFAULT_W - 24, top: 96};
+    }
+    // sized to the window, then pulled fully into view where it fits (the saved place may come from a bigger window)
+    const w = Math.min(s.width, window.innerWidth - 20), h = Math.min(s.height, window.innerHeight - 20);
+    el.style.width = w + 'px';
+    el.style.height = h + 'px';
+    place(el, Math.min(s.left, window.innerWidth - w), Math.min(s.top, window.innerHeight - h));
+  }
+  function reset(el) {
+    try { localStorage.removeItem(KEY + el.id); } catch (e) { /* nothing stored */ }
+    el.style.left = el.style.top = el.style.width = el.style.height = '';
+    el.style.right = '';
+    show(el.id);
+  }
+  document.addEventListener('pointerdown', function (event) {
+    const head = event.target.closest ? event.target.closest('.float-head') : null;
+    if (!head || event.target.closest('button') || (event.button !== undefined && event.button !== 0)) return;
+    const el = head.closest('.float-panel');
+    const r = el.getBoundingClientRect();
+    drag = {el: el, dx: event.clientX - r.left, dy: event.clientY - r.top};
+    el.classList.add('dragging');
+    try { head.setPointerCapture(event.pointerId); } catch (e) { /* the document-level listeners still follow the pointer */ }
+    event.preventDefault();
+  });
+  document.addEventListener('pointermove', function (event) {
+    if (drag) place(drag.el, event.clientX - drag.dx, event.clientY - drag.dy);
+  });
+  function release() {
+    if (drag) drag.el.classList.remove('dragging');
+    drag = null;
+    // a drag or a resize (the CSS corner handle ends on a pointerup too): remember where every open panel is
+    document.querySelectorAll('.float-panel').forEach(function (el) { if (visible(el)) save(el); });
+  }
+  document.addEventListener('pointerup', release);
+  document.addEventListener('pointercancel', release);
+  document.addEventListener('dblclick', function (event) {
+    const head = event.target.closest ? event.target.closest('.float-head') : null;
+    if (head && !event.target.closest('button')) reset(head.closest('.float-panel'));
+  });
+  window.addEventListener('resize', function () {
+    document.querySelectorAll('.float-panel').forEach(function (el) {
+      if (!visible(el)) return;
+      // a smaller window must not leave the header's buttons or the content outside it
+      if (el.offsetWidth > window.innerWidth - 20) el.style.width = (window.innerWidth - 20) + 'px';
+      if (el.offsetHeight > window.innerHeight - 20) el.style.height = (window.innerHeight - 20) + 'px';
+      const r = el.getBoundingClientRect();       // back fully into view, on both axes, where it fits
+      place(el, Math.min(r.left, window.innerWidth - el.offsetWidth), Math.min(r.top, window.innerHeight - el.offsetHeight));
+    });
+  });
+  return {show: show, reset: reset};
+})();
 '''

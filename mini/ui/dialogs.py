@@ -30,16 +30,28 @@ async def copy_to_clipboard(text: str, what: str, *, caution: str = '') -> bool:
 # ---------------------------------------------------------------------------
 def open_patient_dialog(app: AppState):
     visiting = app.phase == 'visiting'
+    stamp = app.patient_stamp                      # what this window is editing; see AppState.patient_stamp
     dialog = ui.dialog().props('persistent')
     with dialog, ui.card().classes('w-[760px] max-w-full gap-3'):
         ui.label('患者匯入').classes('text-xl font-semibold')
         ui.label('貼上患者基本資料；可包含上次就診的病歷（舊病歷的來源標籤只當歷史資料，不會被當成本次逐字稿）。'
                  + ('看診中修改會留下版本與 log。' if visiting else '')).classes('hint')
-        area = ui.textarea(value=app.patient_text, placeholder='例：王○○，男，45歲。高血壓病史 5 年…') \
+        area = ui.textarea(value=app.current_patient_text, placeholder='例：王○○，男，45歲。高血壓病史 5 年…') \
             .props('outlined input-style="height:340px"').classes('w-full')
         error = ui.label('').classes('text-red-700 text-sm')
 
+        def stale() -> bool:
+            """True (and says so) when the data changed since this window opened: saving or clearing now would overwrite
+            a newer version, delete a patient another tab just saved, or act on the wrong patient."""
+            if app.patient_stamp == stamp:
+                return False
+            error.set_text('患者資料在這個視窗開啟後已被改變（可能在另一個分頁修改，或看診已經開始／結束）。'
+                           '請關閉後重新開啟，再操作。')
+            return True
+
         def ok():
+            if stale():
+                return
             try:
                 app.import_patient(area.value or '')
             except StateError as exc:
@@ -49,6 +61,8 @@ def open_patient_dialog(app: AppState):
             ui.notify('已儲存患者資料。' if visiting else '患者資料已匯入，可以開始看診。', type='positive')
 
         def clear():
+            if stale():
+                return
             try:
                 app.clear_patient()
             except StateError as exc:
