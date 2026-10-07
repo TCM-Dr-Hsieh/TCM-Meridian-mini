@@ -12,7 +12,7 @@ import queue
 import threading
 import time
 import wave
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +21,8 @@ import numpy as np
 RATE = 16000
 BLOCK = 1600
 HARDWARE_LOCK = threading.Lock()
+S_OK, S_FALSE, COINIT_MULTITHREADED = 0, 1, 0         # HRESULTs and the apartment mode SoundCard itself uses
+RPC_E_CHANGED_MODE = -2147417850                      # 0x80010106 as the signed HRESULT ctypes returns
 
 
 @dataclass
@@ -72,23 +74,70 @@ class WindowChunker:
         return chunk
 
 
+def _ole32():
+    """The Windows COM library, or None where there is no COM."""
+    if os.name != 'nt':
+        return None
+    import ctypes
+    library = ctypes.windll.ole32
+    library.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    library.CoInitializeEx.restype = ctypes.c_long
+    return library
+
+
+@contextmanager
+def com_initialised():
+    """Initialise COM on the calling thread for the duration of the block (Windows; a no-op elsewhere).
+
+    SoundCard initialises COM only on the thread that first imports it. Every visit records on a new thread, and the thread
+    that imported SoundCard during the first visit ends with it: from then on no thread holds COM, and the next visit's
+    thread fails with 0x800401F0 (CO_E_NOTINITIALIZED). So each thread that calls SoundCard initialises COM itself, and
+    balances it. Two rules: call this AFTER `import soundcard` (that import initialises COM by itself and fails if the
+    thread already did), and release what SoundCard handed out (COM objects) before the block ends.
+
+    Only a successful call is balanced (S_OK, and S_FALSE: already initialised here, which still needs its own
+    CoUninitialize). RPC_E_CHANGED_MODE means the thread is already in another apartment: COM is usable, nothing to undo.
+    Any other HRESULT (E_INVALIDARG, E_OUTOFMEMORY, E_UNEXPECTED) means the thread has no COM: fail here, with the code,
+    instead of letting SoundCard fail later with something that points nowhere.
+    """
+    library = _ole32()
+    result = library.CoInitializeEx(None, COINIT_MULTITHREADED) if library is not None else None
+    if library is not None and result not in (S_OK, S_FALSE, RPC_E_CHANGED_MODE):
+        raise RuntimeError(f'無法初始化 Windows COM（CoInitializeEx 回傳 0x{result & 0xFFFFFFFF:08x}）。')
+    try:
+        yield
+    finally:
+        if result in (S_OK, S_FALSE):
+            library.CoUninitialize()
+
+
 def list_microphones() -> dict[str, str]:
-    import soundcard as sc
-    return {d.id: d.name for d in sc.all_microphones(include_loopback=False)}
+    import soundcard as sc                      # first: see com_initialised
+    with com_initialised():
+        microphones = sc.all_microphones(include_loopback=False)
+        try:
+            return {d.id: d.name for d in microphones}
+        finally:
+            microphones = None                  # COM objects: free them while COM is still initialised on this thread
 
 
 def mic_iterator(device_id: str, stop: threading.Event):
-    import soundcard as sc
+    import soundcard as sc                      # first: see com_initialised
     if not HARDWARE_LOCK.acquire(blocking=False):
         raise RuntimeError('已有其他程式或視窗正在使用錄音裝置。')
+    mic = recorder = None
     try:
-        mic = sc.get_microphone(id=device_id, include_loopback=False) if device_id else sc.default_microphone()
-        # SoundCard's WASAPI backend has a known single-channel capture issue:
-        # request all physical channels, then downmix explicitly.
-        with mic.recorder(samplerate=RATE, channels=None, blocksize=BLOCK) as recorder:
-            while not stop.is_set():
-                samples = recorder.record(numframes=BLOCK)
-                yield samples.mean(axis=1).astype(np.float32)
+        with com_initialised():
+            try:
+                mic = sc.get_microphone(id=device_id, include_loopback=False) if device_id else sc.default_microphone()
+                # SoundCard's WASAPI backend has a known single-channel capture issue:
+                # request all physical channels, then downmix explicitly.
+                with mic.recorder(samplerate=RATE, channels=None, blocksize=BLOCK) as recorder:
+                    while not stop.is_set():
+                        samples = recorder.record(numframes=BLOCK)
+                        yield samples.mean(axis=1).astype(np.float32)
+            finally:
+                mic = recorder = None           # COM objects: free them while COM is still initialised on this thread
     finally:
         HARDWARE_LOCK.release()
 
