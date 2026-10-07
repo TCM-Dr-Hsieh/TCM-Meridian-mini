@@ -501,10 +501,16 @@ async def test_prompts_carry_the_rules_that_shorten_review_loops(make_session):
     reviewer = h.fake.calls_for('reviewer')[0][0]['content']
     # writer: keep every occurrence of a fact consistent; tag all segments a fact spans (existing range/list forms)
     assert '同步檢查整份病歷中該事實的**所有位置**' in writer
-    assert '標籤要涵蓋所有包含它的段落' in writer and '[語音#47-48]' in writer and '[語音#47,48]' in writer
+    assert '標籤要涵蓋所有包含它的段落' in writer and '[語音#47-48]' in writer and '[語音#47, #48]' in writer
+    # the shapes models drift to: a list with no `#` or no space after the comma, a range with `#` on both numbers (said
+    # positively: a prompt that shows the wrong spelling, even as a "don't", invites a local model to copy it)
+    assert '每個編號前都要有 `#`，逗號後留一個空格' in writer and '`#` 只放在第一個編號前' in writer
+    assert '[語音#47-#48]' not in writer
     # reviewer: quote every occurrence in its free-text comment; a range that includes the question is correct
     assert '逐一引用每一處有問題的原文' in reviewer and '不要只列一部分' in reviewer
     assert '不得因為範圍包含提問段或相鄰段就判 G-2' in reviewer
+    assert '`[語音#N, #M]`' in reviewer and '列舉 `[語音#47, #48]`' in reviewer       # the reviewer knows the same list spelling
+    assert '[語音#N,M]' not in writer and '[語音#N,M]' not in reviewer and '[語音#47,48]' not in writer + reviewer
     # both (shared definition): a compound question with one bare yes/no is 未知 (c) 部分回答 -- recorded verbatim, the
     # symptoms are neither all positive nor all negative; it is NOT a sub-item of 陰性 any more
     for system in (writer, reviewer):

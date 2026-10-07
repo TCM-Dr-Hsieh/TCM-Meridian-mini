@@ -122,6 +122,55 @@ def test_strip_citations_only_removes_known_tags():
     assert strip_citations(text) == '頭痛 與 [Lab] 血壓'
 
 
+@pytest.mark.parametrize('tag', [
+    '[語音#3]', '[語音#3-4]',
+    '[語音#3, #5]', '[語音#3, #5, #7]', '[語音#3-4, #7]',          # the list spelling the prompts teach (and models write)
+    '[語音#2, #4-6]',                                              # a list and a range in one tag: the real model wrote it
+    '[語音#3,5]', '[語音#3,5,7]',                                  # the older documented list, still in earlier visits' notes
+    '[語音#3,#5]', '[語音#3, 5]', '[語音#3，#5]', '[語音#3、#5]',     # spellings a model drifts to
+    '[語音#3–4]', '[語音#3—4]', '[語音#3-#4]', '[語音#3 - 4]',      # dashes
+    '[醫師手動]', '[歷史]'])
+def test_every_spelling_of_a_source_tag_is_hidden(tag):
+    assert strip_citations('頭痛三天' + tag) == '頭痛三天'
+    assert strip_citations('頭痛三天 ' + tag + '，無發燒' + tag) == '頭痛三天，無發燒'     # blanks before a tag go with it
+
+
+def test_the_list_tag_a_model_writes_is_hidden_in_a_whole_note():
+    """`[語音#N, #M]` is what models write for a fact in two segments; it used to stay visible (the stripper only knew the
+    comma without `#`), in the browse view, in the copy and in the text sent to the advice, analysis and de-identification."""
+    note = ('現病史：頭痛三天[語音#2, #10]，下午加重[語音#9-10]，無發燒[語音#4]。\n'
+            '過去病史：高血壓五年[歷史][語音#3, #5, #7]；便乾[語音#8,9]。')
+    assert strip_citations(note) == '現病史：頭痛三天，下午加重，無發燒。\n過去病史：高血壓五年；便乾。'
+
+
+@pytest.mark.parametrize('text, left', [
+    ('[語音]', '[語音]'), ('[語音#]', '[語音#]'), ('[語音#abc]', '[語音#abc]'),
+    ('[語音#3, 備註]', '[語音#3, 備註]'), ('[語音#3,]', '[語音#3,]'), ('[語音#3-]', '[語音#3-]'),
+    ('[語音#, #4]', '[語音#, #4]'), ('[語音#3 4]', '[語音#3 4]'),          # a separator is required between numbers
+    ('[Lab, #3]', '[Lab, #3]'), ('語音#3, #5', '語音#3, #5'), ('(語音#3, #5)', '(語音#3, #5)'),
+    ('[語音#3][Lab]', '[Lab]')])                                            # only the real tag goes
+def test_things_that_are_not_source_tags_are_left_alone(text, left):
+    assert strip_citations('頭痛' + text) == '頭痛' + left
+
+
+def test_every_voice_tag_the_prompts_show_is_one_the_stripper_hides():
+    """The prompts teach the writer and the reviewer which tag spellings to use. A spelling shown to the model that the
+    stripper did not know would stay visible everywhere; so every voice tag in any prompt (with N and M standing for
+    numbers) must be hidden, and the list form taught is the one with `#` on every number."""
+    import re
+
+    from mini.config import PROMPTS_DIR
+    shown: set[str] = set()
+    for path in sorted(PROMPTS_DIR.glob('*.txt')):
+        shown |= set(re.findall(r'\[語音#[^\]]*\]', path.read_text(encoding='utf-8')))
+    assert {'[語音#N]', '[語音#N-M]', '[語音#N, #M]', '[語音#47-48]', '[語音#47, #48]'} <= shown
+    for tag in sorted(shown):
+        concrete = tag.replace('N', '3').replace('M', '4')
+        assert strip_citations('頭痛' + concrete) == '頭痛', tag
+    legacy = [tag for tag in shown if re.fullmatch(r'\[語音#[0-9NM]+,[0-9NM]+\]', tag)]
+    assert legacy == [], legacy                                   # the old `[語音#N,M]` is no longer taught anywhere
+
+
 # --- history -------------------------------------------------------------------
 def test_history_undo_redo_and_truncation():
     h = SnapshotHistory()

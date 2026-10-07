@@ -1,6 +1,6 @@
 """Source tags for the daily record (NOTE).
 
-Allowed tags:  [語音#N] [語音#N-M] [語音#N,M]   [醫師手動]   [歷史]
+Allowed tags:  [語音#N] [語音#N-M] [語音#N, #M]   [醫師手動]   [歷史]
 
 As in the original TCM-Meridian, the program does only two things with them: it appends `[醫師手動]` to the
 lines a physician edits by hand (`tag_human_edits`), and it hides the tags in the browse view and when copying
@@ -13,7 +13,12 @@ import difflib
 import re
 
 MANUAL_TAG = '[醫師手動]'
-_TAG_BODY = r'(?:語音#\d+(?:[-,]\d+)*|醫師手動|歷史)'
+# A voice tag is one segment number followed by any further numbers: a range (`-4`) or a list (`, #4`). The prompts teach
+# `[語音#N-M]` and `[語音#N, #M]` (the list used to be documented as `[語音#N,M]`, but models write `, #M`, which that
+# spelling did not hide). Hiding is deliberately lenient: it also takes `,#4`, `,4` (what earlier visits' notes carry), a
+# full-width comma or 頓號, and an en or em dash. Only the hiding is lenient; whether a tag is right is still not checked.
+_SEGMENTS = r'\d+(?:\s*[-–—,，、]\s*#?\d+)*'
+_TAG_BODY = rf'(?:語音#{_SEGMENTS}|醫師手動|歷史)'
 
 
 def strip_citations(text: str) -> str:
