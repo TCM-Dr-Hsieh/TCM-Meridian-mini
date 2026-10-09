@@ -13,8 +13,8 @@ PROMPT_FILE = 'prompt_speaker_fill.txt'
 PROMPT_FILE2 = 'prompt_speaker_fill2.txt'
 CHUNK, BEFORE, AFTER = 25, 40, 10          # sentences asked per call; sentences shown before and after them
 RETRY_NOTE = '\n上一次輸出無效，請只輸出符合格式的 JSON：answers 要為 ask_ids 裡的每個 id 各一筆（沒把握的 role 填「不明」）。'
-ANSWER_NAMES = {'醫師': DOCTOR, '患者家屬': OTHER, '患者或家屬': OTHER, '不明': None}
-SHOWN_NAMES = {DOCTOR: '醫師', OTHER: '患者家屬', UNKNOWN: '?'}
+ANSWER_NAMES = {'醫師': DOCTOR, '患者或家屬': OTHER, '患者家屬': OTHER, '不明': None}       # the old spelling is still understood
+SHOWN_NAMES = {DOCTOR: '醫師', OTHER: '患者或家屬', UNKNOWN: '?'}
 
 
 def load_prompt() -> str:

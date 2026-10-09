@@ -183,7 +183,7 @@ async def test_text_fill_marks_only_sentences_where_the_answer_agrees_with_the_v
     def truthful(messages):
         payload = json.loads(messages[1]['content'])
         rows = {r['id']: r for r in payload['dialogue']}
-        return {'answers': [{'id': i, 'role': '醫師' if rows[i]['text'].startswith('請問') else '患者家屬', 'basis': '問答'}
+        return {'answers': [{'id': i, 'role': '醫師' if rows[i]['text'].startswith('請問') else '患者或家屬', 'basis': '問答'}
                             for i in payload['ask_ids']]}
 
     fake.script['speaker_fill'] = [truthful] * 20
@@ -528,7 +528,7 @@ async def test_the_second_text_fill_takes_an_answer_only_when_it_equals_the_firs
 async def test_a_second_answer_that_differs_from_the_first_leaves_the_sentence_unknown(tmp_path):
     fake = FakeLLM()
     fake.script['speaker_fill'] = [says('醫師')] * 40
-    fake.script['speaker_fill2'] = [says('患者家屬')] * 40
+    fake.script['speaker_fill2'] = [says('患者或家屬')] * 40
     session, _ = await run_visit(tmp_path, fake, unknown_percentile=30.0, embedder=noisy_embedder, turns=60, text_fill2=True)
     await session.finish()
     service = session.speaker

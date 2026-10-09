@@ -67,9 +67,9 @@ def reply(role: str, system: str, user: str) -> str:
                               ensure_ascii=False)
         return json.dumps({'thinking': '1. 遺漏檢查：無。2. A～G 檢查：無。', 'agree': 'yes',
                            'comment': '無須修改，可直接更新病歷'}, ensure_ascii=False)
-    if role == 'speaker_roles':                  # the first voice group is the doctor, every other group is 患者家屬
+    if role == 'speaker_roles':                  # the first voice group is the doctor, every other group is 患者或家屬
         groups = json.loads(user)['groups']
-        return json.dumps({'roles': {g: ('醫師' if n == 0 else '患者家屬') for n, g in enumerate(groups)},
+        return json.dumps({'roles': {g: ('醫師' if n == 0 else '患者或家屬') for n, g in enumerate(groups)},
                            'confidence': '低', 'reason': '假模型'}, ensure_ascii=False)
     if role in ('speaker_fill', 'speaker_fill2'):  # never decides
         return json.dumps({'answers': [{'id': i, 'role': '不明', 'basis': '其他'} for i in json.loads(user)['ask_ids']]},

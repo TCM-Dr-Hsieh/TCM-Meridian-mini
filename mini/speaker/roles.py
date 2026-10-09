@@ -11,7 +11,7 @@ from . import DOCTOR, OTHER
 from .render import segment_runs
 
 PROMPT_FILE = 'prompt_speaker_roles.txt'
-ANSWER_NAMES = {'醫師': DOCTOR, '患者家屬': OTHER, '患者或家屬': OTHER, '不明': None}
+ANSWER_NAMES = {'醫師': DOCTOR, '患者或家屬': OTHER, '患者家屬': OTHER, '不明': None}       # the old spelling is still understood
 LOCK_AFTER = 3             # answers in a row that agree before the model is asked no more (until the groups change)
 MAX_LINES = 80             # the most recent segments shown to the model
 RETRY_NOTE = '\n上一次輸出無效，請只輸出符合格式的 JSON，roles 要列出每一個群。'

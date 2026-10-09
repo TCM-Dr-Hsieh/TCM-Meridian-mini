@@ -112,7 +112,7 @@ def test_no_units_no_tokens():
 
 # --- role layer: parsing and the voter -----------------------------------------------------------------------------------
 def test_a_role_answer_must_name_every_group_with_a_known_word():
-    ok = json.dumps({'roles': {'S1': '醫師', 'S2': '患者家屬', 'S3': '不明'}})
+    ok = json.dumps({'roles': {'S1': '醫師', 'S2': '患者或家屬', 'S3': '不明'}})
     assert roles.parse_answer(ok, [0, 1, 2]) == {0: DOCTOR, 1: OTHER, 2: None}
     assert roles.parse_answer('```json\n' + ok + '\n```', [0, 1, 2])[0] == DOCTOR
     for bad in ('not json', json.dumps({'roles': {'S1': '醫師'}}), json.dumps({'roles': {'S1': '醫生', 'S2': '醫師'}}),
@@ -191,7 +191,7 @@ def test_the_fill_answer_must_cover_every_asked_id_and_unknown_is_a_valid_answer
 
 def test_fill_rows_show_voice_labels_and_hide_everything_else_behind_a_question_mark():
     assert fill.row(3, 75.0, 70.2, DOCTOR, '請坐') == {'id': 3, 't': '01:15', 'gap': 4.8, 'who': '醫師', 'text': '請坐'}
-    assert fill.row(4, 76.0, None, UNKNOWN, '嗯')['who'] == '?' and fill.row(4, 76.0, None, OTHER, '嗯')['who'] == '患者家屬'
+    assert fill.row(4, 76.0, None, UNKNOWN, '嗯')['who'] == '?' and fill.row(4, 76.0, None, OTHER, '嗯')['who'] == '患者或家屬'
     assert fill.row(5, 70.0, 71.0, OTHER, 'x')['gap'] == 0.0                     # never negative
 
 
@@ -392,15 +392,15 @@ def test_the_feed_reports_a_confirmation_even_when_the_map_itself_did_not_change
 def test_a_context_label_read_from_the_text_carries_a_star_for_the_second_fill_and_unknown_never_does():
     from mini.speaker import fill as f
     assert f.row(1, 0.0, None, DOCTOR, '請問', inferred=True)['who'] == '醫師*'
-    assert f.row(1, 0.0, None, OTHER, '好', inferred=True)['who'] == '患者家屬*'
-    assert f.row(1, 0.0, None, OTHER, '好')['who'] == '患者家屬'
+    assert f.row(1, 0.0, None, OTHER, '好', inferred=True)['who'] == '患者或家屬*'
+    assert f.row(1, 0.0, None, OTHER, '好')['who'] == '患者或家屬'
     assert f.row(1, 0.0, None, UNKNOWN, '嗯', inferred=True)['who'] == '?'
 
 
 def test_the_second_fill_prompt_explains_the_star_and_the_two_prompts_stay_apart():
     from mini.config import PROMPTS_DIR
     second = (PROMPTS_DIR / 'prompt_speaker_fill2.txt').read_text(encoding='utf-8')
-    assert '醫師*' in second and '患者家屬*' in second and '"answers"' in second and 'ask_ids' in second
+    assert '醫師*' in second and '患者或家屬*' in second and '"answers"' in second and 'ask_ids' in second
     assert '說話者二階補標員' in second and '說話者補標員' not in second
     assert '先前的答案' not in second and '第一次' not in second                    # the model is never told the first answer
 
@@ -434,4 +434,19 @@ def test_the_second_text_fill_cannot_be_on_while_the_first_is_off():
     both = SpeakerSettings(text_fill=True, text_fill2=True)
     both.validate()
     assert both.text_fill2 is True
+
+
+def test_a_model_that_still_writes_the_old_spelling_is_understood():
+    assert roles.parse_answer(json.dumps({'roles': {'S1': '醫師', 'S2': '患者家屬'}}), [0, 1]) == {0: DOCTOR, 1: OTHER}
+    assert roles.parse_answer(json.dumps({'roles': {'S1': '醫師', 'S2': '患者或家屬'}}), [0, 1]) == {0: DOCTOR, 1: OTHER}
+    rows = json.dumps({'answers': [{'id': 3, 'role': '患者家屬', 'basis': '問答'}, {'id': 4, 'role': '患者或家屬', 'basis': '問答'}]})
+    assert fill.parse_answers(rows, [3, 4]) == {3: OTHER, 4: OTHER}
+
+
+def test_the_model_is_shown_and_asked_with_the_label_that_cannot_be_read_as_the_patients_companion_only():
+    from mini.config import PROMPTS_DIR
+    assert fill.SHOWN_NAMES[OTHER] == '患者或家屬'
+    for name in ('prompt_speaker_roles.txt', 'prompt_speaker_fill.txt', 'prompt_speaker_fill2.txt'):
+        text = (PROMPTS_DIR / name).read_text(encoding='utf-8')
+        assert '患者家屬' not in text and '患者或家屬' in text, name
 

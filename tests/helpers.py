@@ -40,11 +40,11 @@ def deid_reply(patient: str = '患者，男，45歲，高血壓病史', note: st
 
 
 def roles_reply(payload: dict) -> dict:
-    """The role layer's fake answer: the voice group whose lines start with 請問 is the doctor, every other group is 患者家屬."""
+    """The role layer's fake answer: the voice group whose lines start with 請問 is the doctor, every other group is 患者或家屬."""
     import re
     lines = '\n'.join(payload['transcript_by_voice_cluster'])
     doctors = set(re.findall(r'\[(S\d+)\] 請問', lines))
-    return {'roles': {g: ('醫師' if g in doctors else '患者家屬') for g in payload['groups']},
+    return {'roles': {g: ('醫師' if g in doctors else '患者或家屬') for g in payload['groups']},
             'confidence': '高', 'reason': '假的角色判定'}
 
 
