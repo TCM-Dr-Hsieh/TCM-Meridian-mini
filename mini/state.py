@@ -26,8 +26,10 @@ class StateError(RuntimeError):
 class AppState:
     def __init__(self, *, config_path: Path = CONFIG_PATH, client: LLMClient | None = None,
                  asr: LocalASR | None = None, source_factory: Callable | None = None,
-                 llm_backoff: float = 1.0, templates_dir: Path = TEMPLATES_DIR):
+                 llm_backoff: float = 1.0, templates_dir: Path = TEMPLATES_DIR,
+                 speaker_embedder: Callable | None = None):
         self.config_path = config_path
+        self._speaker_embedder = speaker_embedder
         self.templates_dir = templates_dir
         self.settings = Settings.load(config_path)
         self.client = client or LLMClient()
@@ -200,7 +202,8 @@ class AppState:
                                  record_template=self.get_template('record'),
                                  analysis_template=self.get_template('analysis'), client=self.client,
                                  scheduler=self.scheduler, asr=self.asr, on_change=self.bump,
-                                 source_factory=source_factory, llm_backoff=self._llm_backoff)
+                                 source_factory=source_factory, llm_backoff=self._llm_backoff,
+                                 speaker_embedder=self._speaker_embedder)
             try:
                 await visit.start()
             except Exception as exc:

@@ -26,6 +26,8 @@ body {background:#eef2f0; color:#1f2d27; font-family:"Segoe UI","Microsoft Jheng
 .empty {color:#9aa8a1;}
 .seg {margin:2px 0; padding:2px 6px; border-radius:6px;}
 .seg-no {color:#7a8a83; font-size:11px; margin-right:6px; font-family:Consolas,monospace;}
+.who {font-weight:700; margin-right:2px;}
+.who.doctor {color:#1b4332;} .who.other {color:#9a5a00;} .who.unknown {color:#7f8b86; font-weight:600;}
 .seg.unlocked {background:#fff6d6;}
 .seg.gap {background:#fde8d4; color:#9a4b00;}
 .md-h1 {font-size:18px; font-weight:700; color:#1b4332; margin:10px 0 4px;}

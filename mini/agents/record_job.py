@@ -110,7 +110,9 @@ async def run(session, job: Job):
     session.log.emit('job_started', job_id=job.id, kind='record', base_index=session.note.current_index + 1,
                      base_snapshot_id=base_snapshot['id'], patient_version=patient_version, transcript_upto=snap.upto,
                      transcript_max_index=snap.max_index, unlocked=snap.unlocked, review_required=required,
-                     max_review_rounds=max_rounds)
+                     max_review_rounds=max_rounds,
+                     **({'speaker_marks': snap.marked, 'speaker': session.speaker.role_summary()}
+                        if session.speaker is not None else {}))
     writer_prompt = load_system_prompt(WRITER_PROMPT)
     reviewer_prompt = load_system_prompt(REVIEWER_PROMPT)
     call_ids: list[str] = []

@@ -140,6 +140,28 @@ def _llm_body(event: dict) -> str:
     return '\n\n'.join(parts)
 
 
+def _speaker_summary(event: dict) -> tuple[str, str | None]:
+    """One line for the speaker-marking events (SPEC 4.3); the rest of the event is the folded body."""
+    kind = event['type']
+    titles = {'speaker_started': '說話者標記啟動', 'speaker_groups_built': f'聲音群建立（{event.get("groups")} 群）',
+              'speaker_group_added': f'新增聲音群（共 {event.get("groups")} 群）',
+              'speaker_map_set': f'說話者對照表（{"醫師手動" if event.get("source") == "manual" else "LLM"}）：'
+                                 + '、'.join(f'{k}＝{v}' for k, v in (event.get('roles') or {}).items()),
+              'speaker_roles_answer': 'LLM 角色判定（與目前對照表一致，未改變）',
+              'speaker_roles_failed': f'角色判定失敗：{event.get("error", "")[:80]}',
+              'speaker_fill': f'文字補標：問 {event.get("asked")} 句，答 {event.get("answered")} 句，採用 {event.get("accepted")} 句',
+              'speaker_rescored': f'不明句重評分：補上聲音標記 {event.get("promoted")} 句，仍不明 {event.get("unknown")} 句',
+              'speaker_fill2': f'二階文字補標：問 {event.get("asked")} 句，答 {event.get("answered")} 句，採用 {event.get("accepted")} 句',
+              'speaker_fill2_failed': f'二階文字補標失敗：{event.get("error", "")[:80]}',
+              'speaker_fill_failed': f'文字補標失敗：{event.get("error", "")[:80]}',
+              'speaker_lock': '說話者對照表已鎖定' if event.get('locked') else '說話者對照表取消鎖定',
+              'speaker_error': f'說話者標記出錯（{event.get("where")}）：{event.get("error", "")[:100]}',
+              'speaker_unavailable': f'說話者標記未啟用：{event.get("reason", "")[:100]}',
+              'speaker_finished': '說話者標記結束'}
+    detail = {k: v for k, v in event.items() if k not in ('seq', 'ts', 't', 'type')}
+    return titles.get(kind, kind), (json.dumps(detail, ensure_ascii=False, indent=2) if detail else None)
+
+
 def summarize_event(event: dict) -> tuple[str, str | None]:
     """Return (one-line summary, optional long body) for log.md."""
     kind = event.get('type', '')
@@ -201,6 +223,8 @@ def summarize_event(event: dict) -> tuple[str, str | None]:
         return f'顯示字形切換：{event.get("mode")}', None
     if kind == 'visit_started':
         return f'看診開始（{event.get("visit_id")}）', None
+    if kind.startswith('speaker_'):
+        return _speaker_summary(event)
     if kind == 'visit_finished':
         return f'看診結束並存檔（{event.get("visit_id")}）', None
     detail = {k: v for k, v in event.items() if k not in ('seq', 'ts', 't', 'type')}

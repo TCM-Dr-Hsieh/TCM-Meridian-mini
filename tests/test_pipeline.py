@@ -111,7 +111,7 @@ async def test_snapshot_lists_unlocked_segments_and_pending_work(tmp_path):
     assert snap.max_index == 3 and snap.unlocked == [2, 3]
     assert snap.text.startswith('【逐字稿 · 截至 00:12 · 最新的 #2、#3 仍在校稿中（文字日後可能微調，仍是有效來源，可以引用）】')
     assert '尚未鎖定' not in snap.text                  # the old wording made the agents invent "do not cite" rules
-    assert '[#1 00:00–00:06]' in snap.lines
+    assert '語音#1 00:00–00:06 ' in snap.lines
 
 
 async def test_corrector_receives_the_asr_original_so_it_can_fix_opencc_ambiguities(tmp_path):

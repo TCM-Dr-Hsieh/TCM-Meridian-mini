@@ -44,6 +44,7 @@ MAX_VOCABULARY_CHARS = 25_000
 DEFAULT_CONTEXT_TOKENS = 125_000
 DEFAULT_ASR_DIR = r'models\Qwen3-ASR-1.7B'
 DEFAULT_ALIGNER_DIR = r'models\Qwen3-ForcedAligner-0.6B'
+DEFAULT_SPEAKER_MODEL = r'models\speaker\3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx'
 
 AGENT_KEYS = ('transcript_corrector', 'record_writer', 'hallucination_corrector',
               'ai_advice', 'professor_a', 'professor_b', 'professor_c', 'deidentifier')
@@ -164,6 +165,27 @@ class ASRSettings:
 
 
 @dataclass
+class SpeakerSettings:
+    """Speaker marking (SPEC 4.3): label the transcript 醫師 / 患者或家屬 / 不明 from the voices."""
+    enabled: bool = False
+    model_path: str = DEFAULT_SPEAKER_MODEL          # relative paths are resolved against the project folder
+    use_in_jobs: bool = True                         # the writer and reviewer prompts get the speaker marks
+    text_fill: bool = True                           # an LLM decides some of the sentences the voice could not
+    text_fill2: bool = False                         # ... and a second, blind pass over what is still unknown: two equal answers decide
+    unknown_percentile: float = 15.0                 # higher = more "不明", fewer mistakes
+
+    def validate(self):
+        self.enabled = bool(self.enabled)
+        self.use_in_jobs = bool(self.use_in_jobs)
+        self.text_fill = bool(self.text_fill)
+        self.text_fill2 = bool(self.text_fill2) and self.text_fill         # the second pass cannot work without the first
+        self.model_path = str(self.model_path).strip().strip('"')
+        if not self.model_path:
+            raise ValueError('說話者聲紋模型路徑不可留空。')
+        self.unknown_percentile = _number(self.unknown_percentile, '「不明」百分位', 0, 50)
+
+
+@dataclass
 class ReviewSettings:
     pass_required_n: int = 2      # 0 = no review (control-group mode)
     max_review_rounds: int = 6
@@ -196,6 +218,7 @@ def default_professors() -> dict[str, ProfessorStyle]:
 class Settings:
     llm: LLMSettings = field(default_factory=LLMSettings)
     asr: ASRSettings = field(default_factory=ASRSettings)
+    speaker: SpeakerSettings = field(default_factory=SpeakerSettings)
     review: ReviewSettings = field(default_factory=ReviewSettings)
     agents: dict[str, Endpoint] = field(default_factory=default_agents)
     professors: dict[str, ProfessorStyle] = field(default_factory=default_professors)
@@ -204,6 +227,7 @@ class Settings:
     def validate(self):
         self.llm.validate()
         self.asr.validate()
+        self.speaker.validate()
         self.review.validate()
         for key in AGENT_KEYS:
             self.agents[key].validate(AGENT_LABELS[key])
@@ -243,6 +267,7 @@ class Settings:
             # A config from before the vocabulary was split into two: the corrector used to receive the one shared list,
             # so start it from that instead of silently taking the list away. Once saved, the two are independent.
             settings.asr.correction_vocabulary = settings.asr.vocabulary
+        settings.speaker = build(SpeakerSettings, data.get('speaker'))
         settings.review = build(ReviewSettings, data.get('review'))
         agents = default_agents()
         for key, raw in (data.get('agents') or {}).items():

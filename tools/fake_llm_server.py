@@ -24,6 +24,9 @@ ROLE_MARKERS = [
     ('arbitration', '擔任仲裁者'),
     ('cross', '評比對方的版本'),
     ('analysis', '獨立撰寫「分析與處置」'),
+    ('speaker_roles', '診間逐字稿的角色判定員'),
+    ('speaker_fill2', '說話者二階補標員'),
+    ('speaker_fill', '說話者補標員'),
 ]
 ARGS = argparse.Namespace(delay=0.3, fail_reviews=0)
 STATE = {'reviews': 0, 'writes': 0}
@@ -43,7 +46,7 @@ def reply(role: str, system: str, user: str) -> str:
                           ensure_ascii=False)
     if role == 'writer':
         STATE['writes'] += 1
-        numbers = [int(n) for n in re.findall(r'\[#(\d+) ', user)]
+        numbers = [int(n) for n in re.findall(r'語音#(\d+) ', user)]
         first, last = (numbers[0], numbers[-1]) if numbers else (1, 1)
         note_part = user.split('## 【今日病歷（附行號）】', 1)[1].split('## 【病歷模板】', 1)[0] if '今日病歷（附行號）' in user else ''
         existing = [text for text in note_part.splitlines() if re.match(r'\s*\d+ \| ', text)]
@@ -64,6 +67,13 @@ def reply(role: str, system: str, user: str) -> str:
                               ensure_ascii=False)
         return json.dumps({'thinking': '1. 遺漏檢查：無。2. A～G 檢查：無。', 'agree': 'yes',
                            'comment': '無須修改，可直接更新病歷'}, ensure_ascii=False)
+    if role == 'speaker_roles':                  # the first voice group is the doctor, every other group is 患者家屬
+        groups = json.loads(user)['groups']
+        return json.dumps({'roles': {g: ('醫師' if n == 0 else '患者家屬') for n, g in enumerate(groups)},
+                           'confidence': '低', 'reason': '假模型'}, ensure_ascii=False)
+    if role in ('speaker_fill', 'speaker_fill2'):  # never decides
+        return json.dumps({'answers': [{'id': i, 'role': '不明', 'basis': '其他'} for i in json.loads(user)['ask_ids']]},
+                          ensure_ascii=False)
     if role == 'advice':
         return json.dumps({'western_ddx': '1. 上呼吸道感染（需排除肺炎）\n2. 過敏性鼻炎',
                            'tcm_ddx': '1. 風寒束表\n2. 風熱犯肺\n   - 鑑別：咽痛、痰色',

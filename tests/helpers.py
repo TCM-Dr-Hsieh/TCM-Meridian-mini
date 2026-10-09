@@ -19,6 +19,9 @@ ROLE_MARKERS = [
     ('cross', '評比對方的版本'),
     ('analysis', '獨立撰寫「分析與處置」'),
     ('deid', '病歷去識別化助理'),
+    ('speaker_roles', '診間逐字稿的角色判定員'),
+    ('speaker_fill2', '說話者二階補標員'),
+    ('speaker_fill', '說話者補標員'),
 ]
 
 DEFAULT_WRITER_OPS = {'thinking': 't', 'operations': [
@@ -34,6 +37,15 @@ def deid_reply(patient: str = '患者，男，45歲，高血壓病史', note: st
                summary: str = '- 已刪除姓名') -> str:
     """A well-formed reply of the de-identification model."""
     return f'===DATE===\n{date}\n===PATIENT===\n{patient}\n===NOTE===\n{note}\n===SUMMARY===\n{summary}'
+
+
+def roles_reply(payload: dict) -> dict:
+    """The role layer's fake answer: the voice group whose lines start with 請問 is the doctor, every other group is 患者家屬."""
+    import re
+    lines = '\n'.join(payload['transcript_by_voice_cluster'])
+    doctors = set(re.findall(r'\[(S\d+)\] 請問', lines))
+    return {'roles': {g: ('醫師' if g in doctors else '患者家屬') for g in payload['groups']},
+            'confidence': '高', 'reason': '假的角色判定'}
 
 
 def jdump(value) -> str:
@@ -86,6 +98,10 @@ class FakeLLM:
             return DEFAULT_CROSS
         if role == 'deid':
             return deid_reply()
+        if role == 'speaker_roles':
+            return roles_reply(json.loads(messages[1]['content']))
+        if role in ('speaker_fill', 'speaker_fill2'):
+            return {'answers': [{'id': i, 'role': '不明', 'basis': '其他'} for i in json.loads(messages[1]['content'])['ask_ids']]}
         return LONG_TEXT
 
     # -- transport --------------------------------------------------------

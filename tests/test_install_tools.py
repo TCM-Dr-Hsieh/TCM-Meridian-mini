@@ -10,7 +10,7 @@ import pytest
 
 import mini.config as config_module
 import mini.voice.asr as asr_module
-from mini.config import DEFAULT_ALIGNER_DIR, DEFAULT_ASR_DIR, ROOT, Settings, resolve_path
+from mini.config import DEFAULT_ALIGNER_DIR, DEFAULT_ASR_DIR, DEFAULT_SPEAKER_MODEL, ROOT, Settings, resolve_path
 from mini.voice.asr import ASRError, validate_model_dir, worker_python
 
 sys.path.insert(0, str(ROOT / 'tools'))
@@ -28,6 +28,12 @@ def make_model(folder: Path, *, aligner: bool = False) -> Path:
     for name in ('preprocessor_config.json', 'tokenizer_config.json', 'tokenizer.json'):
         (folder / name).write_text('{}', encoding='utf-8')
     (folder / 'model.safetensors').write_bytes(b'weights')
+    return folder
+
+
+def make_speaker_model(folder: Path) -> Path:
+    folder.mkdir(parents=True)
+    (folder / download_models.SPEAKER_FILE).write_bytes(b'onnx stand-in')
     return folder
 
 
@@ -97,12 +103,21 @@ def test_models_are_pinned_to_exact_commits_and_the_right_repos():
     assert asr.folder in DEFAULT_ASR_DIR and aligner.folder in DEFAULT_ALIGNER_DIR   # defaults line up with the downloads
 
 
+def test_the_voiceprint_model_is_one_pinned_file_and_the_default_setting_points_at_it():
+    speaker = download_models.MODELS['speaker']
+    assert speaker.repo == 'csukuangfj/speaker-embedding-models' and re.fullmatch(r'[0-9a-f]{40}', speaker.revision)
+    assert speaker.files == (download_models.SPEAKER_FILE,) and 'zh_en' in speaker.files[0] and 'advanced' in speaker.files[0]
+    default = Path(DEFAULT_SPEAKER_MODEL)
+    assert default.name == download_models.SPEAKER_FILE and default.parent.name == speaker.folder
+    assert not default.is_absolute()
+
+
 def manifest_for(folder: Path, repo: str) -> dict:
     """A manifest describing exactly the files currently in `folder` (SHA-256 for the weights, git blob id otherwise,
     like the real one)."""
     files = {}
     for path in sorted(folder.iterdir()):
-        weights = path.suffix == '.safetensors'
+        weights = path.suffix in ('.safetensors', '.onnx')
         files[path.name] = {'size': path.stat().st_size,
                             'sha256': modelcheck.sha256_of(path) if weights else None,
                             'git_sha1': None if weights else modelcheck.git_blob_sha1(path)}
@@ -122,12 +137,12 @@ def test_is_valid_distinguishes_complete_incomplete_and_wrong_kind(tmp_path, mon
 
 
 # --- version verification against tools/model_manifest.json -------------------------------------------
-def test_the_shipped_manifest_covers_both_pinned_models_and_their_weights():
+def test_the_shipped_manifest_covers_every_pinned_model_and_its_weights():
     manifest = modelcheck.load_manifest()
     for model in download_models.MODELS.values():
         spec = manifest['models'][model.repo]
         assert spec['revision'] == model.revision                      # manifest and pinned commit cannot drift apart
-        assert any(name.endswith('.safetensors') and info['sha256'] for name, info in spec['files'].items())
+        assert any(name.endswith(('.safetensors', '.onnx')) and info['sha256'] for name, info in spec['files'].items())
         assert all(info['size'] > 0 for info in spec['files'].values())
         for name, info in spec['files'].items():                       # a deep check must cover EVERY file
             assert bool(info['sha256']) != bool(info['git_sha1']), f'{name} needs exactly one content hash'
@@ -191,12 +206,15 @@ def reused_models(tmp_path, monkeypatch):
     """Both models present in a user-chosen folder, named in config.json, and described by a matching manifest."""
     asr = make_model(tmp_path / 'mine' / 'asr')
     aligner = make_model(tmp_path / 'mine' / 'aligner', aligner=True)
+    speaker = make_speaker_model(tmp_path / 'mine' / 'speaker')
     repos = download_models.MODELS
     manifest = {'models': {**manifest_for(asr, repos['asr'].repo)['models'],
-                           **manifest_for(aligner, repos['aligner'].repo)['models']}}
+                           **manifest_for(aligner, repos['aligner'].repo)['models'],
+                           **manifest_for(speaker, repos['speaker'].repo)['models']}}
     monkeypatch.setattr(modelcheck, 'load_manifest', lambda path=modelcheck.MANIFEST_PATH: manifest)
     settings = Settings()
     settings.asr.asr_model_dir, settings.asr.aligner_model_dir = str(asr), str(aligner)
+    settings.speaker.model_path = str(speaker / download_models.SPEAKER_FILE)
     config_path = tmp_path / 'config.json'
     settings.save(config_path)
     return config_path, asr, aligner
@@ -230,14 +248,17 @@ def test_deep_verify_catches_same_size_corruption_in_a_reused_model(reused_model
 
 def test_a_managed_folder_that_differs_is_scheduled_for_download(tmp_path, monkeypatch, capsys):
     config_path = tmp_path / 'config.json'
-    Settings().save(config_path)
+    settings = Settings()
+    settings.speaker.model_path = str(tmp_path / 'not-downloaded' / download_models.SPEAKER_FILE)   # not this computer's copy
+    settings.save(config_path)
     base = tmp_path / 'managed'
     make_model(base / download_models.MODELS['asr'].folder)
     make_model(base / download_models.MODELS['aligner'].folder, aligner=True)
-    # The real manifest does not describe these stand-in files, so both count as "not the pinned version".
+    make_speaker_model(base / download_models.MODELS['speaker'].folder)
+    # The real manifest does not describe these stand-in files, so all three count as "not the pinned version".
     assert run_downloader(monkeypatch, config_path, '--dir', str(base), '--check') == 1
     out = capsys.readouterr().out
-    assert out.count('[待下載]') == 2 and '與固定版本不符' in out
+    assert out.count('[待下載]') == 3 and '與固定版本不符' in out
 
 
 def test_display_path_is_relative_inside_the_project_and_absolute_outside():

@@ -143,7 +143,7 @@ async def test_finishing_a_visit_writes_every_audit_file(make_session):
     transcript = json.loads((folder / 'transcript.json').read_text(encoding='utf-8'))
     assert transcript['finished'] and len(transcript['segments']) == 2
     assert 'raw_asr' in transcript['segments'][0] and 'alignment' in transcript['segments'][0]
-    assert (folder / 'transcript.txt').read_text(encoding='utf-8').startswith('[#1 00:00–00:06]')
+    assert (folder / 'transcript.txt').read_text(encoding='utf-8').startswith('語音#1 00:00–00:06 ')
 
     history = json.loads((folder / 'note/history.json').read_text(encoding='utf-8'))
     assert [x['source'] for x in history['snapshots']] == ['init', '病歷書寫 #1', '醫師手動']

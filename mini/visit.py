@@ -11,12 +11,14 @@ from typing import Callable
 
 from . import __version__
 from .agents.common import section
-from .config import Settings
+from .config import Settings, resolve_path
 from .jobs import BusyError, JobManager
 from .llm import LLMCaller, LLMClient, LLMScheduler
 from .record.diff import build_diff_md
 from .record.snapshots import SnapshotHistory
 from .record.tags import tag_human_edits
+from .speaker.embedder import load_embedder
+from .speaker.service import SpeakerService
 from .visit_store import EventLog, VisitStore
 from .voice.asr import LocalASR
 from .voice.audio import make_source
@@ -89,7 +91,7 @@ class VisitSession:
     def __init__(self, *, store: VisitStore, settings: Settings, patient_text: str, record_template: str,
                  analysis_template: str, client: LLMClient, scheduler: LLMScheduler, asr: LocalASR,
                  on_change: Callable[[], None] | None = None, source_factory: Callable | None = None,
-                 llm_backoff: float = 1.0, today: date | None = None):
+                 llm_backoff: float = 1.0, today: date | None = None, speaker_embedder: Callable | None = None):
         self.store = store
         self.visit_id = store.visit_id
         # The visit's date, fixed when the visit starts (not per job, so it cannot change across midnight); every
@@ -104,6 +106,10 @@ class VisitSession:
         self._source_factory = source_factory or (lambda path: make_source(self.settings.asr, path))
         self.source = None
         self.pipeline: TranscriptPipeline | None = None
+        # Speaker marking: `speaker_embedder(model_path)` returns the voiceprint function (a test passes a fake one).
+        self._speaker_embedder = speaker_embedder or load_embedder
+        self.speaker: SpeakerService | None = None
+        self.speaker_note = ''           # why marking is not running although it is switched on
         self.log = EventLog(store.log_path, self.audio_t)
         self.calls: dict[str, dict] = {}
 
@@ -161,9 +167,9 @@ class VisitSession:
         self.transcript_llm_calls += 1
         self.store.append_transcript_llm({'ts': _now(), 't': self.audio_t(), **record})
 
-    def _require_idle(self):
+    def _require_idle(self, what: str = '修改或切換病歷版本'):
         if self.jobs.busy:
-            raise BusyError('作業進行中，暫時無法修改或切換病歷版本。')
+            raise BusyError(f'作業進行中，暫時無法{what}。')
 
     # -- lifecycle -----------------------------------------------------
     async def start(self):
@@ -183,11 +189,53 @@ class VisitSession:
                       audio_source='remote' if remote else 'local',
                       window_seconds=self.settings.asr.window_seconds,
                       overlap_seconds=self.settings.asr.overlap_seconds)
+        self.speaker = await self._make_speaker()
         self.pipeline = TranscriptPipeline(asr=self.asr, asr_settings=self.settings.asr, corrector=self.corrector,
-                                           source=self.source, emit=self.log.emit)
+                                           source=self.source, emit=self.log.emit, speaker=self.speaker)
         self._tasks = [asyncio.create_task(self.pipeline.run(), name='transcript-pipeline'),
                        asyncio.create_task(self._watch(), name='visit-watch')]
+        if self.speaker is not None:
+            self.speaker.start()
         self.phase = 'recording'
+        self.on_change()
+
+    async def _make_speaker(self) -> SpeakerService | None:
+        """The speaker-marking service, or None when it is switched off or cannot run (the visit goes on without it)."""
+        config = self.settings.speaker
+        if not config.enabled:
+            return None
+        try:
+            embed = await asyncio.to_thread(self._speaker_embedder, resolve_path(config.model_path))
+        except Exception as exc:
+            self.speaker_note = f'說話者標記未啟用：{exc}'
+            self.log.emit('speaker_unavailable', reason=str(exc))
+            return None
+        self.log.emit('speaker_started', model=config.model_path, unknown_percentile=config.unknown_percentile,
+                      text_fill=config.text_fill, text_fill2=config.text_fill2, use_in_jobs=config.use_in_jobs)
+        return SpeakerService(
+            settings=config, embed=embed, caller=self._transcript_caller,
+            endpoint=lambda: self.settings.agents['transcript_corrector'],
+            segments=lambda: self.pipeline.segments if self.pipeline is not None else [],
+            emit=self.log.emit, on_change=self._speaker_changed, audio_t=self.audio_t)
+
+    def set_speaker_roles(self, mapping: dict[int, str]):
+        """The physician names the role of voice groups. Refused while a job runs: its prompt took the transcript, marks included,
+        when it started, and changing the roles now would leave the screen and the job disagreeing (like the patient data)."""
+        if self.speaker is None:
+            return
+        self._require_idle('修改說話者對照（進行中的作業用的是它開始時的逐字稿）')
+        self.speaker.set_group_roles(mapping)
+
+    def set_speaker_lock(self, locked: bool):
+        if self.speaker is None:
+            return
+        self._require_idle('變更說話者對照的鎖定')
+        self.speaker.set_lock(locked)
+
+    def _speaker_changed(self):
+        """Marks changed: the stored transcript and the screen are stale."""
+        if self.pipeline is not None:
+            self.pipeline.version += 1
         self.on_change()
 
     async def _watch(self):
@@ -209,6 +257,8 @@ class VisitSession:
         self._last_flush = time.monotonic()
         self.store.write_json('transcript.json', self.pipeline.to_json())
         self.store.write_text('transcript.txt', self.pipeline.transcript_txt())
+        if self.speaker is not None:
+            self.store.write_json('speaker/map.json', self.speaker.map_doc())
 
     async def finish(self) -> Path:
         """Stop recording, let the transcript drain, write every final file.
@@ -247,6 +297,8 @@ class VisitSession:
             for task in self._tasks[1:]:
                 task.cancel()
             await asyncio.gather(*self._tasks[1:], return_exceptions=True)
+        if self.speaker is not None:
+            await self.speaker.finish()               # decide the last sentences, one last role / text-fill pass
         if self.source is not None:
             await self.source.close()
         self.flush_transcript()
@@ -286,6 +338,8 @@ class VisitSession:
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self.speaker is not None:
+            await self.speaker.stop()
         if self.source is not None:
             await self.source.close()
         try:

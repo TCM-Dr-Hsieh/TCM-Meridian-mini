@@ -9,8 +9,10 @@ from types import SimpleNamespace
 
 from nicegui import ui
 
-from ..config import AGENT_KEYS, AGENT_LABELS, MAX_VOCABULARY_CHARS, Endpoint, Settings
+from ..config import AGENT_KEYS, AGENT_LABELS, MAX_VOCABULARY_CHARS, Endpoint, Settings, resolve_path
 from ..jobs import BusyError
+from ..speaker import DOCTOR, OTHER, UNKNOWN
+from ..speaker.embedder import availability
 from ..state import AppState, StateError, TEMPLATE_LABELS
 from ..voice.asr import validate_model_dir
 
@@ -284,8 +286,8 @@ def open_settings_dialog(app: AppState):
     with dialog, ui.card().classes('w-[1100px] max-w-full gap-3'):
         ui.label('模型與設定').classes('text-xl font-semibold')
         with ui.tabs().classes('w-full') as tabs:
-            t_asr, t_llm, t_review, t_prof, t_general = (ui.tab(x) for x in
-                                                         ('語音辨識', 'LLM 接口', '審查', '教授', '一般'))
+            t_asr, t_speaker, t_llm, t_review, t_prof, t_general = (ui.tab(x) for x in
+                                                                    ('語音辨識', '說話者標記', 'LLM 接口', '審查', '教授', '一般'))
         with ui.tab_panels(tabs, value=t_asr).classes('w-full'):
             # ---- ASR -------------------------------------------------------
             with ui.tab_panel(t_asr).classes('gap-3 p-0'):
@@ -342,6 +344,30 @@ def open_settings_dialog(app: AppState):
 
                 ui.button('測試載入 ASR', on_click=test_load).props('outline')
                 ui.timer(0.2, load_mics, once=True)
+
+            # ---- speaker marking -------------------------------------------------
+            with ui.tab_panel(t_speaker).classes('gap-3 p-0'):
+                ui.label('把逐字稿標成「醫師：／患者或家屬：／不明：」。程式用聲音分群，再請「逐字稿校稿」接口的 LLM 判斷哪一群是醫師；'
+                         '標記少部分可能有誤，聲音太相近或太短的句子會標「不明」，不會硬猜。看診中不能更改這些設定。').classes('hint')
+                speaker_on = ui.switch('啟用說話者標記', value=draft.speaker.enabled)
+                speaker_model = ui.input('聲紋模型檔（相對路徑以專案目錄為基準）', value=draft.speaker.model_path).classes('w-full')
+                speaker_jobs = ui.switch('把說話者標記一起給「病歷書寫」與「幻覺修正（審查）」的 prompt',
+                                         value=draft.speaker.use_in_jobs)
+                speaker_fill = ui.switch('用 LLM 依上下文補標「不明」的句子（只在與聲音傾向一致時採用，標示 *）',
+                                         value=draft.speaker.text_fill)
+                speaker_fill2 = ui.switch('二階補標：對一階補標後仍不明的句子再問 LLM 一次（不給第一次的答案），兩次答案一致才採用，標示 *（需先開啟上一項）',
+                                          value=draft.speaker.text_fill2).mark('speaker-fill2')
+                speaker_fill2.bind_enabled_from(speaker_fill, 'value')
+                speaker_pct = ui.number('「不明」百分位（0–50，預設 15；越大越多「不明」、越少標錯）',
+                                        value=draft.speaker.unknown_percentile, min=0, max=50, step=1).classes('w-96')
+                speaker_result = ui.label('').classes('text-sm')
+
+                def check_speaker():
+                    reason = availability(resolve_path(speaker_model.value or ''))
+                    speaker_result.set_text(reason or '聲紋模型與所需套件都可用。')
+
+                ui.button('檢查聲紋模型', on_click=check_speaker).props('outline')
+                ui.label('聲紋只存在記憶體，看診結束就消失；存檔只有角色對照表、各分鐘的統計與你的手動操作（不含聲紋）。').classes('hint')
 
             # ---- LLM ---------------------------------------------------------
             rows: dict[str, tuple] = {}
@@ -428,6 +454,10 @@ def open_settings_dialog(app: AppState):
                 new.asr.window_seconds, new.asr.overlap_seconds = window.value, overlap.value
                 new.asr.context_chars, new.asr.vocabulary = context.value, vocabulary.value or ''
                 new.asr.correction_vocabulary = correction_vocabulary.value or ''
+                new.speaker.enabled, new.speaker.model_path = bool(speaker_on.value), speaker_model.value or ''
+                new.speaker.use_in_jobs, new.speaker.text_fill = bool(speaker_jobs.value), bool(speaker_fill.value)
+                new.speaker.text_fill2 = bool(speaker_fill2.value) and bool(speaker_fill.value)
+                new.speaker.unknown_percentile = speaker_pct.value if speaker_pct.value is not None else 15.0
                 for key in AGENT_KEYS:
                     u, s, m, t, x, c = rows[key]
                     new.agents[key] = Endpoint(u.value or '', s.value or '', m.value or '', t.value, x.value, c.value)
@@ -450,3 +480,127 @@ def open_settings_dialog(app: AppState):
             ui.button('取消', on_click=dialog.close).props('flat')
             ui.button('儲存設定', on_click=save)
     dialog.open()
+
+
+# ---------------------------------------------------------------------------
+# speaker groups
+# ---------------------------------------------------------------------------
+ROLE_OPTIONS = {DOCTOR: '醫師', OTHER: '患者或家屬'}              # a group nobody named shows no value; it cannot be set back to that
+
+
+def open_speaker_dialog(app: AppState):
+    """The voice groups heard so far: who each one is (the physician can override the model), how much it spoke, two examples.
+
+    The window is refreshed while it is open, but a group's row is only built once and then updated in place: rebuilding it
+    would close a dropdown the physician is choosing from."""
+    visit = app.visit
+    service = visit.speaker if visit is not None else None
+    if service is None or visit.phase != 'recording':
+        ui.notify('看診中且啟用說話者標記時才能使用。', type='warning')
+        return
+    w = SimpleNamespace()
+    rows: dict[int, SimpleNamespace] = {}
+    shape: list = [None]
+    programmatic = [False]                         # set while the window itself changes a widget (no click to answer)
+    dialog = ui.dialog()
+    with dialog, ui.card().classes('w-[760px] max-w-full gap-2').style('max-height:90vh; overflow:auto'):
+        ui.label('說話者群').classes('text-xl font-semibold')
+        ui.label('程式依聲音把說話的人分成幾群（S1、S2…），再請 LLM 判斷哪一群是醫師。判斷錯了可以在這裡改；'
+                 '你改過之後以你的為準，逐字稿已標好的句子會跟著更新。患者與陪診家屬不必分開，都選「患者或家屬」。').classes('hint')
+        w.status = ui.label('').classes('text-sm').mark('speaker-status')
+        w.busy = ui.label('作業進行中，暫時不能修改對照（作業用的是它開始時的逐字稿）；作業結束後再改。') \
+            .classes('text-sm text-amber-900').mark('speaker-busy')
+        w.body = ui.element('div').classes('w-full gap-2')
+        w.lock = ui.switch('鎖定目前的對照（不再請 LLM 重新判斷）', value=service.locked,
+                           on_change=lambda e: toggle_lock(bool(e.value))).mark('speaker-lock')
+        with ui.row().classes('w-full justify-end'):
+            ui.button('關閉', on_click=dialog.close)
+
+    def put_back(gid: int):
+        """A change was refused: show what is really in force again."""
+        programmatic[0] = True
+        try:
+            row = rows.get(gid)
+            if row is not None:
+                row.select.set_value(service.tracker.role_of(gid) if service.tracker.role_of(gid) != UNKNOWN else None)
+        finally:
+            programmatic[0] = False
+
+    def choose(gid: int, role: str):
+        if programmatic[0] or role not in (DOCTOR, OTHER):
+            return
+        try:
+            visit.set_speaker_roles({gid: role})                # refused while a job runs
+        except BusyError as exc:
+            ui.notify(str(exc), type='warning')
+            put_back(gid)
+
+    def toggle_lock(locked: bool):
+        if programmatic[0] or locked == service.locked:
+            return
+        try:
+            visit.set_speaker_lock(locked)
+        except BusyError as exc:
+            ui.notify(str(exc), type='warning')
+            programmatic[0] = True
+            try:
+                w.lock.set_value(service.locked)
+            finally:
+                programmatic[0] = False
+
+    def build(groups):
+        rows.clear()
+        w.body.clear()
+        with w.body:
+            if not groups:
+                ui.label('聲音群還沒有建立（看診開始後約 1 分鐘，且兩個人都要有說話）。').classes('hint')
+            for g in groups:
+                row = SimpleNamespace(examples=None, shown=None)
+                with ui.element('div').classes('w-full border rounded p-2 gap-1').mark(f'speaker-group-{g["gid"]}'):
+                    with ui.row().classes('w-full items-center gap-3 no-wrap'):
+                        ui.label(g['name']).classes('font-semibold')
+                        row.select = ui.select(ROLE_OPTIONS, value=g['role'] or None, label='這一群是',
+                                               on_change=lambda e, gid=g['gid']: choose(gid, e.value)) \
+                            .props('dense outlined').classes('w-44').mark(f'speaker-role-{g["gid"]}')
+                        row.stats = ui.label('').classes('text-sm')
+                    row.examples = ui.element('div').classes('w-full')
+                rows[g['gid']] = row
+
+    def refresh():
+        if not dialog.value or app.visit is not visit or visit.phase != 'recording':
+            timer.cancel()
+            if dialog.value:
+                dialog.close()
+            return
+        groups = service.groups()
+        ids = tuple(g['gid'] for g in groups)
+        if shape[0] != ids:
+            build(groups)
+            shape[0] = ids
+        w.status.set_text(service.status)
+        busy = visit.jobs.busy
+        w.busy.set_visibility(busy)
+        w.lock.set_enabled(not busy)
+        programmatic[0] = True
+        try:
+            if w.lock.value != service.locked:
+                w.lock.set_value(service.locked)
+            for g in groups:
+                row = rows[g['gid']]
+                row.select.set_enabled(not busy)
+                row.stats.set_text(f'說話約 {g["seconds"]:.0f} 秒（佔 {g["share"] * 100:.0f}%），{g["units"]} 個片段')
+                if row.select.value != (g['role'] or None):
+                    row.select.set_value(g['role'] or None)
+                shown = (tuple(g['examples']), app.script_mode)
+                if row.shown != shown:
+                    row.shown = shown
+                    row.examples.clear()
+                    with row.examples:
+                        for example in g['examples']:
+                            ui.label('例：' + app.display(example)).classes('text-sm hint')
+        finally:
+            programmatic[0] = False
+
+    timer = ui.timer(0.5, refresh, immediate=False)
+    dialog.open()
+    refresh()

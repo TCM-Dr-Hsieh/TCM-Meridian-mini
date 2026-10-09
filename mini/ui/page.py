@@ -13,6 +13,7 @@ from nicegui import ui
 from ..jobs import BusyError
 from ..record.diff import diff_html, simple_md_render
 from ..record.tags import strip_citations
+from ..speaker import LABEL_NAMES, TEXT_SOURCES, UNKNOWN
 from ..state import AppState, StateError
 from ..textutil import format_clock
 from . import dialogs
@@ -84,6 +85,10 @@ class MainPage:
                 # Opens a window to browse and run 去識別化. It opens while another job runs too (to read earlier results);
                 # the window's own 去識別化 button waits for the single job slot.
                 w.btn_deid = ui.button('LLM 去識別化', icon='shield', on_click=self.open_deid).props('outline')
+                # The voice groups of the speaker marking (who is the doctor, who spoke how much). Only in a visit that runs it.
+                w.btn_speakers = ui.button('說話者群', icon='record_voice_over',
+                                           on_click=lambda: dialogs.open_speaker_dialog(self.app)) \
+                    .props('outline').mark('speakers-button')
                 w.btn_cancel = ui.button('取消作業', icon='close', on_click=self.cancel_job).props('flat color=negative')
             with ui.element('div').classes('status-bar'):
                 w.status = ui.label('').classes('grow')
@@ -541,6 +546,13 @@ class MainPage:
         w.patient_text.classes(replace='patient-text' + (' empty' if empty else ''))
         w.btn_patient_copy.set_enabled(not empty)
 
+    def run_html(self, run) -> str:
+        """One stretch of one speaker: `醫師：…`. A star marks a label read from the text, not heard (less reliable)."""
+        guessed = run.source in TEXT_SOURCES and run.label != UNKNOWN
+        name = LABEL_NAMES[run.label] + ('*' if guessed else '')
+        title = ' title="由上下文推測，沒有聲音佐證，可信度較低"' if guessed else ''
+        return f'<span class="who {run.label}"{title}>{name}：</span>{html.escape(self.app.display(run.text))}'
+
     def render_transcript(self):
         w, v, app = self.w, self.visit, self.app
         if v is None or v.pipeline is None:
@@ -548,13 +560,15 @@ class MainPage:
             return
         pipeline = v.pipeline
         unlocked = set(pipeline.unlocked_indexes())
+        speaker = v.speaker if v.speaker is not None and v.speaker.marks_visible else None
         rows = []
         for seg in pipeline.segments:
             if not seg.visible:
                 continue
             cls = 'seg gap' if seg.kind == 'gap' else ('seg unlocked' if seg.index in unlocked else 'seg')
-            rows.append(f'<div class="{cls}"><span class="seg-no">#{seg.index} {format_clock(seg.new_start)}</span>'
-                        f'{html.escape(app.display(seg.corrected))}</div>')
+            runs = speaker.runs(seg) if speaker is not None and seg.kind == 'speech' else None
+            body = ' '.join(self.run_html(run) for run in runs) if runs else html.escape(app.display(seg.corrected))
+            rows.append(f'<div class="{cls}"><span class="seg-no">#{seg.index} {format_clock(seg.new_start)}</span>{body}</div>')
         w.tx_html.set_content(''.join(rows) if rows else _placeholder('（等待語音…）'))
         ui.run_javascript(f"window.miniScrollToEnd('c{w.tx_scroll.id}')")
 
@@ -588,6 +602,10 @@ class MainPage:
                 parts.append(f'逐字稿：{v.pipeline.status}' + (f'（待處理 {behind}）' if behind else ''))
                 if behind >= BACKLOG_WARNING_WINDOWS:
                     parts.append(f'⚠ 逐字稿已落後約 {behind * 3} 秒（錄音與音檔不受影響；結束時需等它處理完）')
+            if v.speaker is not None:
+                parts.append(v.speaker.status)
+            elif v.speaker_note:
+                parts.append(f'⚠ {v.speaker_note}')
             if v.source is not None and getattr(v.source, 'kind', '') == 'remote' and v.source.status_text:
                 parts.append(f'遠端麥克風：{v.source.status_text}')
                 if (v.source.status_text == '等待瀏覽器連線' and not v.source.done.is_set()
@@ -643,6 +661,9 @@ class MainPage:
         for name in ('btn_write', 'btn_advice', 'btn_analysis'):
             getattr(w, name).set_enabled(can_act and not busy and not editing)
         w.btn_deid.set_enabled(can_act and not editing)
+        has_speaker = bool(v and v.speaker is not None)
+        w.btn_speakers.set_visibility(has_speaker)
+        w.btn_speakers.set_enabled(has_speaker and can_act and v.speaker.tracker.group_count > 0)
         w.btn_cancel.set_visibility(busy)
         w.btn_model.set_enabled(not visiting and not finishing)
         w.btn_template.set_enabled(not visiting and not finishing)

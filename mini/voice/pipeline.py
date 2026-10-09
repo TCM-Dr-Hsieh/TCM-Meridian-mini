@@ -16,6 +16,7 @@ from ..textutil import format_clock, join_texts, script
 from .alignment import AlignmentError, map_alignment, select_new_window
 from .asr import ASRError, LocalASR
 from .audio import AudioSource, Chunk
+from ..speaker.service import MARKS_NOTE
 from .corrector import RollingResult, TranscriptCorrector
 from .editing import changes
 
@@ -64,6 +65,7 @@ class TranscriptSnapshot:
     max_index: int       # highest segment index that exists
     unlocked: list[int]
     pending: int
+    marked: bool = False   # the lines carry speaker marks
 
 
 def gap_marker(start: float, end: float) -> str:
@@ -72,11 +74,12 @@ def gap_marker(start: float, end: float) -> str:
 
 class TranscriptPipeline:
     def __init__(self, *, asr: LocalASR, asr_settings: ASRSettings, corrector: TranscriptCorrector | None,
-                 source: AudioSource, emit: Callable[..., None] | None = None):
+                 source: AudioSource, emit: Callable[..., None] | None = None, speaker=None):
         self.asr = asr
         self.settings = asr_settings
         self.corrector = corrector
         self.source = source
+        self.speaker = speaker           # a SpeakerService, or None when speaker marking is off for this visit
         self._emit = emit or (lambda *a, **k: None)
         self.segments: list[Segment] = []
         self.revisions: list[Revision] = []
@@ -101,11 +104,14 @@ class TranscriptPipeline:
         return [s.index for s in self.segments[start:] if s.kind == 'speech']
 
     def snapshot(self) -> TranscriptSnapshot:
-        lines = '\n'.join(self.line(s) for s in self.segments if s.visible)
+        marked = self.speaker is not None and self.speaker.marks_in_text and self.speaker.settings.use_in_jobs
+        lines = '\n'.join(self.line(s, marked) for s in self.segments if s.visible)
         upto = max((s.end for s in self.segments), default=0.0)
         unlocked = self.unlocked_indexes()
         pending = self.pending if not self.finished else 0
         header = f'【逐字稿 · 截至 {format_clock(upto)}'
+        if marked:
+            header += f' · {MARKS_NOTE}'
         if unlocked:
             # "Unlocked" only means the rolling corrector may still touch these segments. The model must read them
             # as valid sources (they are usually the newest, most relevant lines); the old wording, "尚未鎖定", made
@@ -116,19 +122,26 @@ class TranscriptPipeline:
         header += '】'
         last = max((s.index for s in self.segments if s.visible), default=0)
         return TranscriptSnapshot(f'{header}\n{lines}' if lines else f'{header}\n（尚無逐字稿內容）',
-                                  lines, upto, last, len(self.segments), unlocked, pending)
+                                  lines, upto, last, len(self.segments), unlocked, pending, marked)
 
-    @staticmethod
-    def line(segment: Segment) -> str:
-        return f'[#{segment.index} {format_clock(segment.new_start)}–{format_clock(segment.end)}] {segment.corrected}'
+    def line(self, segment: Segment, marked: bool = False) -> str:
+        """One transcript line; with `marked`, the text carries the speaker marks (`醫師: … -> 患者或家屬: …`) when it has any."""
+        body = self.speaker.body(segment) if marked and self.speaker is not None and segment.kind == 'speech' else None
+        text = segment.corrected if body is None else body
+        return f'語音#{segment.index} {format_clock(segment.new_start)}–{format_clock(segment.end)} {text}'
 
     def transcript_txt(self) -> str:
-        return '\n'.join(self.line(s) for s in self.segments if s.visible) + '\n'
+        marked = self.speaker is not None and self.speaker.marks_in_text
+        return '\n'.join(self.line(s, marked) for s in self.segments if s.visible) + '\n'
 
     def to_json(self) -> dict:
-        return {'finished': self.finished,
+        data = {'finished': self.finished,
                 'segments': [asdict(s) for s in self.segments],
                 'revisions': [asdict(r) for r in self.revisions]}
+        if self.speaker is not None:
+            data['speaker'] = {'status': self.speaker.status, 'roles_trusted': self.speaker.trusted,
+                               'labels': self.speaker.labels_doc()}
+        return data
 
     # -- processing ----------------------------------------------------
     async def run(self):
@@ -177,7 +190,7 @@ class TranscriptPipeline:
             self.committed_end = end          # silence: nothing to add
             self.status = '等待語音'
             return
-        added_asr, _ = select_new_window(raw_asr, units, self.committed_end)
+        added_asr, selected = select_new_window(raw_asr, units, self.committed_end)
         raw, added = script.to_traditional(raw_asr), script.to_traditional(added_asr)
         new_start = chunk.start if self.committed_end < 0 else max(chunk.start, self.committed_end)
         candidate = Segment(len(self.segments) + 1, 'speech', chunk.start, end, new_start, raw_asr, raw, added,
@@ -216,6 +229,8 @@ class TranscriptPipeline:
                    new_start=candidate.new_start, raw_asr=candidate.raw_asr, raw=candidate.raw,
                    added=candidate.added, corrected=candidate.corrected, elapsed=candidate.elapsed,
                    warning=candidate.warning)
+        if self.speaker is not None and selected:
+            await self.speaker.feed_segment(chunk, candidate, selected, added_asr)     # never raises: marking must not stop the transcript
 
     def _add_gap(self, chunk: Chunk, error: str):
         end = chunk.start + chunk.duration

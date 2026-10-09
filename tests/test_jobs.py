@@ -60,7 +60,7 @@ async def test_record_job_writes_after_n_passes(make_session):
                                                                           'passes': 2, 'required': 2}
     assert len(h.fake.calls_for('writer')) == 1 and len(h.fake.calls_for('reviewer')) == 2
     writer_user = h.fake.calls_for('writer')[0][1]['content']
-    assert '[#1 ' in writer_user and '45歲男性' in writer_user and '甲- 現病史：' in writer_user   # transcript+patient+template
+    assert '語音#1 ' in writer_user and '45歲男性' in writer_user and '甲- 現病史：' in writer_user   # transcript+patient+template
     review_events = [e for e in s.log.events if e['type'] == 'review_result']
     assert len(review_events) == 2 and all(e['agree'] == 'yes' and e['thinking'] for e in review_events)
 
@@ -288,7 +288,7 @@ async def test_advice_job_creates_versions_with_navigation(make_session):
     assert v.western_ddx.startswith('- 偏頭痛') and v.tcm_ddx == '肝陽上亢'
     prompt = h.fake.calls_for('advice')[0][1]['content']
     assert '45歲男性' in prompt and '頭痛三天' in prompt and '[語音#' not in prompt        # patient + note, tags stripped
-    assert '[#1 ' not in prompt                                                          # the transcript is NOT an input
+    assert '語音#1 ' not in prompt                                                          # the transcript is NOT an input
     await h.run_job('advice')
     s = h.session
     assert len(s.advice) == 2 and s.advice_index == 1
@@ -321,7 +321,7 @@ async def test_analysis_runs_five_calls_in_three_stages(make_session):
     a_prompt, b_prompt = [m for r, m in h.fake.calls if r == 'analysis']
     assert '嚴謹、保守' in a_prompt[0]['content'] and '溫和' in b_prompt[0]['content']      # distinct styles
     assert '教授甲' in a_prompt[0]['content'] and '教授乙' in b_prompt[0]['content']
-    assert '[#1 ' not in a_prompt[1]['content'] and '一- 西醫診斷' in a_prompt[1]['content']   # no transcript; template present
+    assert '語音#1 ' not in a_prompt[1]['content'] and '一- 西醫診斷' in a_prompt[1]['content']   # no transcript; template present
     cross = [m for r, m in h.fake.calls if r == 'cross']
     assert '教授乙' in cross[0][0]['content'] and '你的版本' in cross[0][1]['content']
     arb = h.fake.calls_for('arbitration')[0][1]['content']

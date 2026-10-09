@@ -8,7 +8,7 @@
     2. 找到 Python 3.12（找不到時，經你同意用 winget 安裝）
     3. 建立 UI 用的 .venv 並安裝套件
     4. 建立獨立的 ASR 用 .venv-asr（含 CUDA 版 PyTorch，約 4 GB）
-    5. 從 Hugging Face 下載 Qwen3-ASR-1.7B 與 Qwen3-ForcedAligner-0.6B（約 6.1 GB，固定版本）
+    5. 從 Hugging Face 下載 Qwen3-ASR-1.7B、Qwen3-ForcedAligner-0.6B 與說話者聲紋模型（共約 6.1 GB，固定版本）
     6. 寫入 config.json
     7. 健檢（含實際載入 ASR 模型辨識一次）
   可重複執行：已完成的步驟會略過，下載可續傳。記錄寫在 setup.log。
@@ -310,7 +310,7 @@ try {
         Write-Step 5 '下載模型（已略過）'
         Write-Note '之後可執行：.venv-asr\Scripts\python.exe tools\download_models.py --write-config'
     } else {
-        Write-Step 5 '下載語音模型（Qwen3-ASR-1.7B 與 ForcedAligner-0.6B，共約 6.1 GB，可續傳）'
+        Write-Step 5 '下載語音模型（Qwen3-ASR-1.7B、ForcedAligner-0.6B 與說話者聲紋模型，共約 6.1 GB，可續傳）'
         $dlArgs = @((Join-Path $Root 'tools\download_models.py'), '--write-config')
         # 明確指定 -ModelsDir 時以它為準；否則才沿用 config.json 裡已指到完整模型的資料夾。
         if ($ModelsDir) { $dlArgs += @('--dir', $ModelsDir) } else { $dlArgs += '--reuse-config' }

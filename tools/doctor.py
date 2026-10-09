@@ -19,7 +19,7 @@ try:
 except AttributeError:
     pass
 
-from mini.config import CONFIG_PATH, ROOT, Settings       # noqa: E402
+from mini.config import CONFIG_PATH, ROOT, Settings, resolve_path       # noqa: E402
 
 ASR_PROBE = r'''
 import json, sys
@@ -118,6 +118,31 @@ def check_models(settings: Settings, deep: bool = False):
             report('OK', label, f'{folder}（與固定版本相符{"，已核對全部檔案的內容雜湊" if deep else ""}）')
 
 
+def check_speaker(settings: Settings, deep: bool = False):
+    """The voiceprint model of the speaker marking: packages, the model file, its version, and one real run."""
+    from mini.speaker.embedder import DIMENSION, OnnxEmbedder, availability
+    import modelcheck
+    path = resolve_path(settings.speaker.model_path)
+    on = settings.speaker.enabled
+    reason = availability(path)
+    if reason:                                   # a visit goes on without marking when it cannot run, so this is a warning
+        report('WARN' if on else 'OK', '說話者標記', reason if on else f'未啟用（{reason}）')
+        return
+    drift = modelcheck.problems(path.parent, modelcheck.REPOS['speaker'], deep=deep)
+    try:
+        import numpy as np
+        vector = OnnxEmbedder(path).embed(np.random.default_rng(0).normal(0, 0.1, 12800).astype(np.float32))
+        assert vector is not None and vector.shape == (DIMENSION,)
+    except Exception as exc:
+        report('WARN' if on else 'OK', '說話者聲紋模型', f'{path} 無法執行：{type(exc).__name__}: {exc}')
+        return
+    state = '已啟用' if on else '未啟用（模型設定 → 說話者標記）'
+    if drift:
+        report('WARN', '說話者聲紋模型', f'{path} 與本程式驗證的固定版本不同：{modelcheck.summarize(drift)}；{state}')
+    else:
+        report('OK', '說話者聲紋模型', f'{path}（與固定版本相符{"，已核對內容雜湊" if deep else ""}，實際跑通一次）；{state}')
+
+
 def check_microphone():
     try:
         from mini.voice.audio import list_microphones
@@ -202,6 +227,7 @@ async def main() -> int:
     if not args.skip_asr:
         check_asr_environment(settings)
         check_models(settings, deep=args.verify_models)
+    check_speaker(settings, deep=args.verify_models)
     check_microphone()
     if not args.no_llm:
         await check_llm(settings)
