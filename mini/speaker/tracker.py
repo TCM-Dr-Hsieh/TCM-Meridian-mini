@@ -18,7 +18,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import DOCTOR, OTHER, UNKNOWN
+from . import BACKGROUND, BACKGROUND_GID, DOCTOR, OTHER, UNKNOWN
 from .mathutil import kmeans, tied_two_component, unit_rows
 from .units import SENT_PAUSE, Token, UnitStream
 
@@ -45,6 +45,10 @@ class Params:
     max_groups: int = 4
     far_cos: float = 0.25                # a unit this unlike every group is not used for the vote
     clip: float = 6.0                    # log-likelihood ratios are clipped to +-clip
+    background_rel_db: float = -8.0      # background voices: a sentence this much quieter than the doctor's usual level ...
+    background_max_cos: float = 0.425    # ... AND fitting no voice group better than this (mean best cosine of its units); -inf / 0 switch it off
+    quiet_gate_db: float = 10.0          # a unit this much quieter than the `quiet_gate_percentile` level of all units is left out of the group fit
+    quiet_gate_percentile: float = 75.0  # (inf switches it off); such units are still assigned to the nearest group afterwards
 
 
 class AudioBuffer:
@@ -81,6 +85,7 @@ class Unit:
     t1: float
     sentence: int
     vec: np.ndarray | None       # unit-length voiceprint, None when it could not be measured
+    level: float = float('nan')  # mean-square level of its audio in dBFS, nan when the audio was not at hand
 
     @property
     def seconds(self) -> float:
@@ -104,6 +109,7 @@ class Sentence:
     said: str = ''               # the role the first text fill answered when that answer was not accepted (DOCTOR | OTHER), else ''
     said_refit: int = 0          # how many refits there had been when that answer came back
     asked2: bool = False         # already shown to the second text fill
+    background: bool = False     # judged to be somebody else's voice (another room): shown grey, kept out of the record and the votes
 
 
 @dataclass(frozen=True)
@@ -137,6 +143,7 @@ class SpeakerTracker:
         self._roles: dict[int, str | None] = {}
         self._confirmed: frozenset[int] | None = None  # None = every named group is shown; else only these groups are (the others show unknown)
         self._calibration: tuple[float, float, float] | None = None
+        self._ref_level: float | None = None         # the doctor's usual level (dBFS): the yardstick for "much quieter" (background voices)
         self._next_horizon = self.params.refit_seconds
         self._model_horizon = 0.0
         self._cursor = 0                             # sentences before it are decided
@@ -189,7 +196,7 @@ class SpeakerTracker:
         centres = self._centres
         if centres is None:
             return []
-        measured = [u for u in list(self.units) if u.vec is not None]
+        measured = [u for u in list(self.units) if u.vec is not None and not self.sentences[u.sentence].background]    # background voices are counted apart
         seconds = np.zeros(len(centres))
         counts = np.zeros(len(centres), dtype=int)
         if measured:
@@ -201,7 +208,7 @@ class SpeakerTracker:
         infos = []
         for g in range(len(centres)):
             examples = [i for i in range(self._cursor - 1, -1, -1)
-                        if self.sentences[i].gid == g and self.sentences[i].source == 'voice'
+                        if self.sentences[i].gid == g and self.sentences[i].source == 'voice' and not self.sentences[i].background
                         and self.sentences[i].last - self.sentences[i].first >= 2][:2]
             role = self.role_of(g)
             infos.append(GroupInfo(g, group_name(g), None if role == UNKNOWN else role, int(counts[g]), float(seconds[g]),
@@ -209,13 +216,16 @@ class SpeakerTracker:
         return infos
 
     def voice_groups_for(self, seg: int) -> list[tuple[int, int, int | None]]:
-        """(c0, c1, voice group) for each timed piece of a segment: the group its voiceprint is nearest to, None when it has none."""
+        """(c0, c1, voice group) for each timed piece of a segment: the group its voiceprint is nearest to, None when it has none,
+        BACKGROUND_GID for a piece of a sentence judged to be background voices."""
         centres = self._centres
         result = []
         for i in list(self._seg_tokens.get(seg, [])):
             token, unit = self.tokens[i], self._unit_of.get(i)
             vec = self.units[unit].vec if unit is not None else None
             gid = int((centres @ vec).argmax()) if centres is not None and vec is not None else None
+            if self._background(i):
+                gid = BACKGROUND_GID
             result.append((token.c0, token.c1, gid))
         return result
 
@@ -235,9 +245,10 @@ class SpeakerTracker:
 
     def stats(self) -> dict:
         decided = [s for s in self.sentences[:self._cursor]]
-        labelled = [s for s in decided if self.shown_role(s.gid) != UNKNOWN]       # what the screen shows: an unnamed or unconfirmed group is unknown
+        background = [s for s in decided if s.background]
+        labelled = [s for s in decided if not s.background and self.shown_role(s.gid) != UNKNOWN]       # what the screen shows: an unnamed or unconfirmed group is unknown
         return {'sentences': len(self.sentences), 'decided': len(decided), 'labelled': len(labelled),
-                'unknown': len(decided) - len(labelled), 'groups': self.group_count,
+                'unknown': len(decided) - len(labelled) - len(background), 'background': len(background), 'groups': self.group_count,
                 'text_filled': sum(1 for s in labelled if s.source == 'text'),
                 'text_filled2': sum(1 for s in labelled if s.source == 'text2'),
                 'rescored': self.rescored,
@@ -289,15 +300,16 @@ class SpeakerTracker:
         for group in finished:
             first, last = group[0], group[-1]
             t0, t1 = tokens[first].start, tokens[last].end
-            vec = None
+            vec, level = None, float('nan')
             audio = self.audio.slice(t0, t1)
             if audio is not None:
+                level = float(10.0 * np.log10(max(float(np.mean(np.square(audio, dtype=np.float64))), 1e-12)))
                 raw = self._embed(audio)
                 if raw is not None and np.all(np.isfinite(raw)) and np.linalg.norm(raw) > 0:
                     vec = unit_rows(raw)
             sentence = self._sentence_of[first]
             number = len(self.units)
-            self.units.append(Unit(first, last, t0, t1, sentence, vec))
+            self.units.append(Unit(first, last, t0, t1, sentence, vec, level))
             self.sentences[sentence].units.append(number)
             for i in range(first, last + 1):
                 self._unit_of[i] = number
@@ -312,6 +324,7 @@ class SpeakerTracker:
             refitted = True
         if refitted or self.finished:
             changed |= self._rescore()
+            changed |= self._remark_background()
         before = self._cursor
         self._decide()
         for s in self.sentences[before:self._cursor]:
@@ -330,21 +343,41 @@ class SpeakerTracker:
         p = self.params
         self._model_horizon = horizon
         past = [u for u in self.units if u.vec is not None and u.t1 < horizon]
-        if len(past) >= p.first_fit_units:
-            X = np.stack([u.vec for u in past])
-            w = np.array([u.seconds for u in past])
-            if self._centres is None:
-                self._build_first_groups(X, w, horizon)
-            else:
-                self._update_groups(X, w, np.array([u.t1 for u in past]), horizon)
+        fit = self._without_quiet(past)
+        if len(fit) >= p.first_fit_units:
+            self._fit(fit, horizon)
+        self._update_reference()
         self._recalibrate()
         self.minutes.append({'minute': round(horizon / 60), 'units': len(past), 'groups': self.group_count,
-                             'sentences_decided': self._cursor,
+                             'sentences_decided': self._cursor, 'left_out_of_fit': len(past) - len(fit),
                              'unknown_share': self._unknown_share(horizon - p.refit_seconds, horizon)})
+
+    def _fit(self, units: list[Unit], horizon: float):
+        X = np.stack([u.vec for u in units])
+        w = np.array([u.seconds for u in units])
+        if self._centres is None:
+            self._build_first_groups(X, w, horizon)
+        else:
+            self._update_groups(X, w, np.array([u.t1 for u in units]), horizon)
+
+    def _without_quiet(self, units: list[Unit]) -> list[Unit]:
+        """The units the voice groups are fitted on. The ones much quieter than the rest (somebody in another room, or far from the
+        microphone) are left out: the most DISTINCT voice would otherwise take a whole group, and two voices in the room that sound alike
+        would be merged into one (2026-10-11 recordings, SPEC 4.3). They still get the nearest group afterwards."""
+        p = self.params
+        levels = np.array([u.level for u in units])
+        known = np.isfinite(levels)
+        if not known.any():
+            return units
+        floor = float(np.percentile(levels[known], p.quiet_gate_percentile)) - p.quiet_gate_db
+        return [u for u, level, ok in zip(units, levels, known) if not ok or level >= floor]
 
     def _unknown_share(self, t0: float, t1: float) -> float | None:
         window = [s for s in self.sentences[:self._cursor] if t0 <= s.t0 < t1]
-        return round(sum(self.shown_role(s.gid) == UNKNOWN for s in window) / len(window), 3) if window else None
+        return round(sum(self._is_unknown(s) for s in window) / len(window), 3) if window else None
+
+    def _is_unknown(self, s: Sentence) -> bool:
+        return not s.background and self.shown_role(s.gid) == UNKNOWN
 
     def _build_first_groups(self, X: np.ndarray, w: np.ndarray, horizon: float):
         p = self.params
@@ -386,6 +419,50 @@ class SpeakerTracker:
             centres, _, _ = kmeans(X[near], w[near], k, init=self._centres)
             self._centres = unit_rows(centres)
 
+    # ------------------------------------------------------------------ background voices
+    def _update_reference(self):
+        """The doctor's usual level: the median level of the past units nearest to a doctor group. None until a doctor group is named."""
+        self._ref_level = None
+        doctor = self._doctor_groups()
+        if self._centres is None or not doctor:
+            return
+        past = [u for u in self.units if u.vec is not None and np.isfinite(u.level) and u.t1 < self._model_horizon]
+        if len(past) < self.params.first_fit_units:
+            return
+        nearest = (np.stack([u.vec for u in past]) @ self._centres.T).argmax(1)
+        mine = [u.level for u, g in zip(past, nearest) if g in doctor]
+        if len(mine) >= self.params.first_fit_units:
+            self._ref_level = float(np.median(mine))
+
+    def _is_background(self, s: Sentence) -> bool:
+        """Another room's voices: clearly quieter than the doctor AND unlike every voice group (a conservative two-cue rule; on the 15
+        labelled recordings it caught about 73% of the background words and took none of the doctor's or the patient's; a weak-voiced
+        patient sounds like background from cosine 0.45 up, so the threshold stays below that, SPEC 4.3). Needs a named doctor group (the yardstick for "quieter") and a voiceprint."""
+        if self._ref_level is None or self._centres is None:
+            return False
+        units = [self.units[n] for n in s.units if self.units[n].vec is not None and np.isfinite(self.units[n].level)]
+        if not units:
+            return False
+        seconds = np.array([u.seconds for u in units])
+        power = float(np.average(10.0 ** (np.array([u.level for u in units]) / 10.0), weights=seconds))
+        quieter = 10.0 * np.log10(max(power, 1e-12)) - self._ref_level
+        best = float(np.mean([(self._centres @ u.vec).max() for u in units]))
+        return quieter < self.params.background_rel_db and best < self.params.background_max_cos
+
+    def _remark_background(self) -> set[int]:
+        """The groups, the doctor's level or the roles have just changed: every decided sentence is judged again (either way)."""
+        changed = set()
+        for s in self.sentences[:self._cursor]:
+            flag = self._is_background(s)
+            if flag != s.background:
+                s.background = flag
+                changed |= self._sentence_segments(s)
+        return changed
+
+    def _background(self, token: int) -> bool:
+        s = self.sentences[self._sentence_of[token]]
+        return s.decided and s.background
+
     def _recalibrate(self):
         """Map the doctor-minus-others similarity to a log-likelihood ratio with a two-component mixture on the PAST units."""
         self._calibration = None
@@ -410,7 +487,9 @@ class SpeakerTracker:
                 return set()
             self._roles = known
             self.roles_version += 1
+            self._update_reference()
             self._recalibrate()
+            self._remark_background()
             self._decide()
             changed = set(self._seg_tokens)
             self._publish(changed)
@@ -462,7 +541,7 @@ class SpeakerTracker:
         threshold = float(np.percentile(self._history, self.params.unknown_percentile))
         changed, promoted = set(), 0
         for s in self.sentences[:self._cursor]:
-            if s.gid is not None:
+            if s.gid is not None or s.background:
                 continue
             got = self._score(s, doctor, other)
             if got is None:
@@ -475,7 +554,7 @@ class SpeakerTracker:
         if promoted:
             self.rescored += promoted
             self.events.append({'event': 'speaker_rescored', 'promoted': promoted,
-                                'unknown': sum(1 for s in self.sentences[:self._cursor] if self.shown_role(s.gid) == UNKNOWN)})
+                                'unknown': sum(1 for s in self.sentences[:self._cursor] if self._is_unknown(s))})
         return changed
 
     def _decide(self):
@@ -504,6 +583,7 @@ class SpeakerTracker:
         for i in ready:
             s, got = self.sentences[i], scores[i]
             s.decided, s.source = True, 'voice'
+            s.background = self._is_background(s)
             if got is not None:
                 node, lean = got
                 threshold = fixed if seeded else (float(np.percentile(self._history, percentile)) if self._history else 0.0)
@@ -519,7 +599,7 @@ class SpeakerTracker:
         """Unknown sentences not yet shown to the text fill, with enough decided sentences after them to read as context."""
         with self._lock:
             return [i for i in range(self._cursor)
-                    if self.sentences[i].gid is None and not self.sentences[i].asked
+                    if self.sentences[i].gid is None and not self.sentences[i].asked and not self.sentences[i].background
                     and (final or self._cursor - 1 - i >= FILL_AFTER)]
 
     def fill_due(self, wanted: list[int]) -> bool:
@@ -557,7 +637,7 @@ class SpeakerTracker:
             refits = len(self.minutes)
             return [i for i in range(self._cursor)
                     if self.sentences[i].gid is None and self.sentences[i].said and not self.sentences[i].asked2
-                    and refits >= self.sentences[i].said_refit + FILL2_REFITS]
+                    and not self.sentences[i].background and refits >= self.sentences[i].said_refit + FILL2_REFITS]
 
     def fill2_due(self, wanted: list[int]) -> bool:
         return len(wanted) >= FILL2_BATCH
@@ -604,6 +684,8 @@ class SpeakerTracker:
     # ------------------------------------------------------------------ publishing
     def _label(self, i: int) -> tuple[str, str]:
         s = self.sentences[self._sentence_of[i]]
+        if s.decided and s.background:
+            return BACKGROUND, 'voice'
         if not s.decided or s.gid is None:
             return UNKNOWN, ''
         role = self.shown_role(s.gid)

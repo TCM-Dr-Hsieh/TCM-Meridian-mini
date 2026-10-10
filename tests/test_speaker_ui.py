@@ -13,7 +13,7 @@ from tests.helpers import FakeASR, FakeLLM, roles_reply
 from tests.speaker_fakes import DOCTOR_LINE, PATIENT_LINE, FakeEmbedder, bases, conversation, scripted_source
 
 
-def speaker_state(tmp_path, fake: FakeLLM, *, enabled=True, turns=40) -> AppState:
+def speaker_state(tmp_path, fake: FakeLLM, *, enabled=True, turns=40, talk=None, embedder=None) -> AppState:
     settings = Settings()
     settings.visits_dir = str(tmp_path / 'visits')
     settings.speaker.enabled = enabled
@@ -22,12 +22,12 @@ def speaker_state(tmp_path, fake: FakeLLM, *, enabled=True, turns=40) -> AppStat
     (templates / 'defaults').mkdir(parents=True)
     (templates / 'defaults' / 'record_template.txt').write_text('甲- 現病史：\n', encoding='utf-8')
     (templates / 'defaults' / 'analysis_template.txt').write_text('一- 西醫診斷：\n', encoding='utf-8')
-    audio, replies, _ = conversation(turns)
+    audio, replies = talk if talk else conversation(turns)[:2]
     state: AppState = AppState(
         config_path=tmp_path / 'config.json', templates_dir=templates, client=LLMClient(fake.transport()),
         asr=FakeASR(replies), llm_backoff=0,
         source_factory=lambda path: scripted_source(state.settings, audio, recording_path=path),
-        speaker_embedder=lambda path: FakeEmbedder(bases(2), seed=3))
+        speaker_embedder=embedder or (lambda path: FakeEmbedder(bases(2), seed=3)))
     return state
 
 
@@ -74,6 +74,18 @@ async def test_the_transcript_shows_who_speaks_and_the_status_line_says_marking_
     await user.should_see('說話者標記：已啟用', retries=60)
     html_text = marked_html(state)
     assert f'醫師：</span>{DOCTOR_LINE}' in html_text and f'患者或家屬：</span>{PATIENT_LINE}' in html_text
+    await state.finish_visit()
+
+
+async def test_background_voices_are_grey_on_the_page_and_the_status_line_counts_them(user: User, tmp_path):
+    from tests.test_speaker_background import BACKGROUND_LINE, QUIET, Scattered, background_conversation, voices
+    state = await started(user, tmp_path, talk=background_conversation(),
+                          embedder=lambda path: Scattered(voices(), (QUIET,), noise=0.15, seed=3))
+    await until(lambda: state.visit.speaker.trusted)
+    await user.should_see('背景：', retries=60)
+    assert f'<span class="bg-text">{BACKGROUND_LINE}</span>' in marked_html(state)
+    await user.should_see('，背景 ', retries=60)
+    assert BACKGROUND_LINE not in state.visit.pipeline.snapshot().text                  # grey on the screen, absent from the writer's transcript
     await state.finish_visit()
 
 

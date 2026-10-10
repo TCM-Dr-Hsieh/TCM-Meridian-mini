@@ -8,14 +8,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
-from . import LABEL_NAMES, TEXT_SOURCES, UNKNOWN
+from . import BACKGROUND, LABEL_NAMES, TEXT_SOURCES, UNKNOWN
 
 TEXT_MARK = '*'            # a label that came from reading the text, not from the voice (less reliable)
 
 
 @dataclass(frozen=True)
 class Run:
-    label: str             # DOCTOR | OTHER | UNKNOWN
+    label: str             # DOCTOR | OTHER | UNKNOWN | BACKGROUND
     source: str            # '' | 'voice' | 'text' | 'text2'
     text: str
 
@@ -62,6 +62,7 @@ def prompt_name(run: Run) -> str:
     return LABEL_NAMES[run.label] + (TEXT_MARK if run.source in TEXT_SOURCES and run.label != UNKNOWN else '')
 
 
-def prompt_body(runs: list[Run]) -> str:
-    """`醫師: … -> 患者或家屬: … -> 不明: …` (one entry when the whole segment is one speaker)."""
-    return ' -> '.join(f'{prompt_name(r)}: {r.text}' for r in runs)
+def prompt_body(runs: list[Run], keep_background: bool = False) -> str:
+    """`醫師: … -> 患者或家屬: … -> 不明: …` (one entry when the whole segment is one speaker). Background voices (another room) are left
+    out, so they never reach the record writer; `keep_background` keeps them as `背景: …` (the saved transcript file)."""
+    return ' -> '.join(f'{prompt_name(r)}: {r.text}' for r in runs if keep_background or r.label != BACKGROUND)

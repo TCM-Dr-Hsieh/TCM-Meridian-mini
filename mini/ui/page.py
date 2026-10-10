@@ -13,7 +13,7 @@ from nicegui import ui
 from ..jobs import BusyError
 from ..record.diff import diff_html, simple_md_render
 from ..record.tags import strip_citations
-from ..speaker import LABEL_NAMES, TEXT_SOURCES, UNKNOWN
+from ..speaker import BACKGROUND, LABEL_NAMES, TEXT_SOURCES, UNKNOWN
 from ..state import AppState, StateError
 from ..textutil import format_clock
 from . import dialogs
@@ -548,6 +548,9 @@ class MainPage:
 
     def run_html(self, run) -> str:
         """One stretch of one speaker: `醫師：…`. A star marks a label read from the text, not heard (less reliable)."""
+        if run.label == BACKGROUND:                     # grey, and not sent to the record: the physician can still read it
+            return (f'<span class="who background" title="疑似隔壁房間或環境的人聲，不會送進病歷書寫">{LABEL_NAMES[BACKGROUND]}：</span>'
+                    f'<span class="bg-text">{html.escape(self.app.display(run.text))}</span>')
         guessed = run.source in TEXT_SOURCES and run.label != UNKNOWN
         name = LABEL_NAMES[run.label] + ('*' if guessed else '')
         title = ' title="由上下文推測，沒有聲音佐證，可信度較低"' if guessed else ''

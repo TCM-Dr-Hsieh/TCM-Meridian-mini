@@ -105,9 +105,10 @@ class TranscriptPipeline:
 
     def snapshot(self) -> TranscriptSnapshot:
         marked = self.speaker is not None and self.speaker.marks_in_text and self.speaker.settings.use_in_jobs
-        lines = '\n'.join(self.line(s, marked) for s in self.segments if s.visible)
+        written = {s.index: self.line(s, marked) for s in self.segments if s.visible}
+        lines = '\n'.join(line for line in written.values() if line)         # a segment of nothing but background voices has no line
         upto = max((s.end for s in self.segments), default=0.0)
-        unlocked = self.unlocked_indexes()
+        unlocked = [i for i in self.unlocked_indexes() if written.get(i, True)]
         pending = self.pending if not self.finished else 0
         header = f'【逐字稿 · 截至 {format_clock(upto)}'
         if marked:
@@ -124,15 +125,19 @@ class TranscriptPipeline:
         return TranscriptSnapshot(f'{header}\n{lines}' if lines else f'{header}\n（尚無逐字稿內容）',
                                   lines, upto, last, len(self.segments), unlocked, pending, marked)
 
-    def line(self, segment: Segment, marked: bool = False) -> str:
-        """One transcript line; with `marked`, the text carries the speaker marks (`醫師: … -> 患者或家屬: …`) when it has any."""
-        body = self.speaker.body(segment) if marked and self.speaker is not None and segment.kind == 'speech' else None
+    def line(self, segment: Segment, marked: bool = False, keep_background: bool = False) -> str:
+        """One transcript line; with `marked`, the text carries the speaker marks (`醫師: … -> 患者或家屬: …`) when it has any. Background
+        voices (another room) are left out whether it is marked or not, so the line is '' when nothing else is left; `keep_background` keeps them
+        (as `背景: …` in a marked line)."""
+        body = self.speaker.body(segment, marks=marked, keep_background=keep_background) if self.speaker is not None and segment.kind == 'speech' else None
+        if body == '':
+            return ''
         text = segment.corrected if body is None else body
         return f'語音#{segment.index} {format_clock(segment.new_start)}–{format_clock(segment.end)} {text}'
 
     def transcript_txt(self) -> str:
         marked = self.speaker is not None and self.speaker.marks_in_text
-        return '\n'.join(self.line(s, marked) for s in self.segments if s.visible) + '\n'
+        return '\n'.join(self.line(s, marked, keep_background=True) for s in self.segments if s.visible) + '\n'
 
     def to_json(self) -> dict:
         data = {'finished': self.finished,

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from ..config import PROMPTS_DIR
 from ..llm import ValidationError
 from ..textutil import extract_json
-from . import DOCTOR, OTHER
+from . import BACKGROUND_GID, DOCTOR, OTHER
 from .render import segment_runs
 
 PROMPT_FILE = 'prompt_speaker_roles.txt'
@@ -36,8 +36,8 @@ def dialogue_lines(segments, tracker, limit: int = MAX_LINES) -> list[str]:
         pieces = tracker.voice_groups_for(segment.index)
         if not pieces:
             continue
-        labels = tuple((c0, c1, 'S?' if gid is None else group_label(gid), '') for c0, c1, gid in pieces)
-        runs = segment_runs(segment.added, segment.corrected, labels)
+        labels = tuple((c0, c1, 'bg' if gid == BACKGROUND_GID else 'S?' if gid is None else group_label(gid), '') for c0, c1, gid in pieces)
+        runs = [r for r in segment_runs(segment.added, segment.corrected, labels) if r.label != 'bg']       # background voices are not part of the dialogue
         if runs:
             lines.append(f'#{segment.index} ' + ' '.join(f'[{r.label}] {r.text}' for r in runs))
     return lines[::-1]

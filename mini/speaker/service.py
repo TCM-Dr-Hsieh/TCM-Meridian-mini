@@ -10,7 +10,7 @@ from typing import Callable
 
 from ..config import Endpoint, SpeakerSettings
 from ..llm import CallFailed, LLMCaller, PRIORITY_BACKGROUND
-from . import DOCTOR, LABEL_NAMES, OTHER, TEXT_SOURCES, UNKNOWN, fill, roles
+from . import BACKGROUND, DOCTOR, LABEL_NAMES, OTHER, TEXT_SOURCES, UNKNOWN, fill, roles
 from .render import project, prompt_body, segment_runs
 from .tracker import Params, SpeakerTracker, group_name
 from .units import Token, ends_sentence
@@ -113,18 +113,26 @@ class SpeakerService:
             return f'說話者標記：暫定，待下一次角色判定確認後才給病歷作業（{self.tracker.group_count} 個聲音群）'
         stats = self.tracker.stats()
         share = f'，不明 {stats["unknown"] * 100 // max(1, stats["decided"])}%' if stats['decided'] else ''
+        share += f'，背景 {stats["background"]} 句' if stats['background'] else ''
         waiting = len(self.voter.pending_groups)
         pending = f'，{waiting} 群待確認（確認前畫面與病歷作業都視為不明）' if waiting > 0 else ''
         return f'說話者標記：已啟用（{stats["groups"]} 個聲音群{share}{pending}）'
 
-    def body(self, segment) -> str | None:
-        """The segment's text with `醫師: … -> 患者或家屬: …` marks; None when it has no timed text (a gap, or marking is off)."""
+    def body(self, segment, *, marks: bool, keep_background: bool = False) -> str | None:
+        """The segment's text for a prompt or a file; None when it is to be used as it is (no timed text: a gap, or marking is off; or no marks
+        wanted and no background voices in it). With `marks`: `醫師: … -> 患者或家屬: …`. Background voices (another room) are left out whether
+        marks are wanted or not (an empty string when nothing else is left), or kept as `背景: …` with `keep_background` (marks only)."""
         if self.failed:
             return None
         labels = self.tracker.labels_for(segment.index)
         if not labels or not segment.corrected.strip():
             return None
-        return prompt_body(segment_runs(segment.added, segment.corrected, labels))
+        runs = segment_runs(segment.added, segment.corrected, labels)
+        if marks:
+            return prompt_body(runs, keep_background)
+        if keep_background or not any(r.label == BACKGROUND for r in runs):
+            return None
+        return ' '.join(r.text for r in runs if r.label != BACKGROUND)
 
     def runs(self, segment):
         """The segment as runs of one speaker, for the screen; None when it has no timed text."""
@@ -328,6 +336,8 @@ class SpeakerService:
             rows, previous_end = [], None
             for i in shown:
                 sentence = tracker.sentences[i]
+                if sentence.background:                   # somebody else's voice: not part of the dialogue the model reads
+                    continue
                 if i > 0 and previous_end is None:
                     previous_end = tracker.sentences[i - 1].t1
                 if second:                            # every label is shown; the ones read from the text carry a star

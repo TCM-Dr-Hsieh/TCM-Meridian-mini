@@ -351,7 +351,7 @@ def open_settings_dialog(app: AppState):
                          '標記少部分可能有誤，聲音太相近或太短的句子會標「不明」，不會硬猜。看診中不能更改這些設定。').classes('hint')
                 speaker_on = ui.switch('啟用說話者標記', value=draft.speaker.enabled)
                 speaker_model = ui.input('聲紋模型檔（相對路徑以專案目錄為基準）', value=draft.speaker.model_path).classes('w-full')
-                speaker_jobs = ui.switch('把說話者標記一起給「病歷書寫」與「幻覺修正（審查）」的 prompt',
+                speaker_jobs = ui.switch('把說話者標記（醫師／患者或家屬）一起給「病歷書寫」與「幻覺修正（審查）」的 prompt（判為背景人聲的句子不論此項都不會給）',
                                          value=draft.speaker.use_in_jobs)
                 speaker_fill = ui.switch('用 LLM 依上下文補標「不明」的句子（只在與聲音傾向一致時採用，標示 *）',
                                          value=draft.speaker.text_fill)
