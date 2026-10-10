@@ -568,13 +568,15 @@ class SpeakerTracker:
                 self.sentences[i].asked2 = asked
 
     def apply_fill2(self, index: int, role: str) -> bool:
-        """The second answer decides only when it equals the first one. The sentence goes to the voice group of that role that its
-        voiceprint is nearest to (or, without a voiceprint, to the nearest earlier sentence of that role): a label always belongs to
+        """The second answer decides whenever it names a role, whatever the first answer or the weak voice lean said: this pass sees the
+        neighbours' text-filled labels, the first one did not, and it was the more accurate of the two on the recordings measured
+        (SPEC 4.3). Only a sentence the first fill was given (`said`) is eligible. The sentence goes to the voice group of that role that
+        its voiceprint is nearest to (or, without a voiceprint, to the nearest earlier sentence of that role): a label always belongs to
         a voice group, so a later correction of the role map still moves it. When no group can be chosen on evidence, the sentence
         stays unknown."""
         with self._lock:
             s = self.sentences[index]
-            if index >= self._cursor or s.gid is not None or role not in (DOCTOR, OTHER) or role != s.said:
+            if index >= self._cursor or s.gid is not None or not s.said or role not in (DOCTOR, OTHER):
                 return False
             gid = self._group_for_role(index, role)
             if gid is None:

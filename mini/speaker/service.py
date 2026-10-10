@@ -47,7 +47,7 @@ class SpeakerService:
         self.manual_events: list[dict] = []
         self.failed = ''
         self.fill_stats = {'asked': 0, 'accepted': 0, 'rejected': 0, 'failed_calls': 0}
-        self.fill2_stats = {'asked': 0, 'accepted': 0, 'rejected': 0, 'failed_calls': 0}
+        self.fill2_stats = {'asked': 0, 'accepted': 0, 'rejected': 0, 'failed_calls': 0, 'accepted_agreeing': 0, 'accepted_differing': 0}
         self._asked_roles_at: tuple[int, int] = (0, 0)
         self._seen_groups = 0
         self._finished = False
@@ -307,7 +307,7 @@ class SpeakerService:
 
     async def _fill2(self, final: bool):
         """Second text fill: sentences still unknown are asked again, blind (the first answer is not shown) and with the neighbours'
-        text-filled labels in view; the sentence takes the answer only when it equals the first one. The final pass takes whatever is
+        text-filled labels in view; the sentence takes the role it names, whatever the first answer or the voice said. The final pass takes whatever is
         left, however few."""
         tracker = self.tracker
         await self._fill_stage(final, wanted=tracker.fill2_candidates(), due=tracker.fill2_due, second=True)
@@ -356,11 +356,18 @@ class SpeakerService:
                 stats['failed_calls'] += 1
                 self.emit(f'{agent}_failed', error=exc.last_error, sentences=len(ask))
                 continue
-            accepted = sum(apply(i, role) for i, role in outcome.value.items())
+            taken = [i for i, role in outcome.value.items() if apply(i, role)]
+            accepted = len(taken)
             stats['asked'] += len(ask)
             stats['accepted'] += accepted
             stats['rejected'] += len(outcome.value) - accepted
-            self.emit(agent, asked=len(ask), answered=len(outcome.value), accepted=accepted)
+            extra = {}
+            if second:                                # the second answer equal to the first one, or not: counted apart, for checking later
+                differing = sum(1 for i in taken if tracker.sentences[i].said != outcome.value[i])
+                stats['accepted_differing'] += differing
+                stats['accepted_agreeing'] += accepted - differing
+                extra = {'agreeing': accepted - differing, 'differing': differing}
+            self.emit(agent, asked=len(ask), answered=len(outcome.value), accepted=accepted, **extra)
             if accepted:
                 self._on_change()
 

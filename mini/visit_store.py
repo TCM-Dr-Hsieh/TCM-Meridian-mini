@@ -143,6 +143,8 @@ def _llm_body(event: dict) -> str:
 def _speaker_summary(event: dict) -> tuple[str, str | None]:
     """One line for the speaker-marking events (SPEC 4.3); the rest of the event is the folded body."""
     kind = event['type']
+    # events written before the split was recorded (earlier visits) carry neither count: show no split rather than "0 / 0"
+    split = (f'（與一階答案相同 {event["agreeing"]}、不同 {event["differing"]}）' if 'agreeing' in event and 'differing' in event else '')
     titles = {'speaker_started': '說話者標記啟動', 'speaker_groups_built': f'聲音群建立（{event.get("groups")} 群）',
               'speaker_group_added': f'新增聲音群（共 {event.get("groups")} 群）',
               'speaker_map_set': f'說話者對照表（{"醫師手動" if event.get("source") == "manual" else "LLM"}）：'
@@ -151,7 +153,7 @@ def _speaker_summary(event: dict) -> tuple[str, str | None]:
               'speaker_roles_failed': f'角色判定失敗：{event.get("error", "")[:80]}',
               'speaker_fill': f'文字補標：問 {event.get("asked")} 句，答 {event.get("answered")} 句，採用 {event.get("accepted")} 句',
               'speaker_rescored': f'不明句重評分：補上聲音標記 {event.get("promoted")} 句，仍不明 {event.get("unknown")} 句',
-              'speaker_fill2': f'二階文字補標：問 {event.get("asked")} 句，答 {event.get("answered")} 句，採用 {event.get("accepted")} 句',
+              'speaker_fill2': f'二階文字補標：問 {event.get("asked")} 句，答 {event.get("answered")} 句，採用 {event.get("accepted")} 句' + split,
               'speaker_fill2_failed': f'二階文字補標失敗：{event.get("error", "")[:80]}',
               'speaker_fill_failed': f'文字補標失敗：{event.get("error", "")[:80]}',
               'speaker_lock': '說話者對照表已鎖定' if event.get('locked') else '說話者對照表取消鎖定',

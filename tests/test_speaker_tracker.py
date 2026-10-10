@@ -673,18 +673,22 @@ def test_the_second_fill_waits_for_twelve_sentences():
     assert not tracker.fill2_due(list(range(11))) and tracker.fill2_due(list(range(12)))
 
 
-def test_the_second_answer_decides_only_when_it_equals_the_first_and_the_sentence_is_still_unknown():
+def test_the_second_answer_decides_whenever_it_names_a_role_if_the_first_fill_saw_the_sentence_and_it_is_still_unknown():
     tracker, ids = fill_session()
     i = ids[0]
     s = tracker.sentences[i]
-    assert tracker.apply_fill2(i, DOCTOR) is False                                # nothing said before
+    assert tracker.apply_fill2(i, DOCTOR) is False                                # the first fill never answered it
     s.said = DOCTOR
-    assert tracker.apply_fill2(i, OTHER) is False and s.gid is None                # a different second answer
-    assert tracker.apply_fill2(i, DOCTOR) is True
-    assert s.source == 'text2' and tracker.role_of(s.gid) == DOCTOR and tracker.stats()['text_filled2'] == 1
+    assert tracker.apply_fill2(i, 'unknown') is False and s.gid is None            # not a role
+    assert tracker.apply_fill2(i, OTHER) is True                                  # a different answer from the first one still decides
+    assert s.source == 'text2' and tracker.role_of(s.gid) == OTHER and tracker.stats()['text_filled2'] == 1
     assert tracker.apply_fill2(i, DOCTOR) is False                                # no longer unknown
     labels = [label for labels in tracker.all_labels().values() for _, _, label, source in labels if source == 'text2']
-    assert labels and set(labels) == {DOCTOR}                                    # published, with the source kept
+    assert labels and set(labels) == {OTHER}                                     # published, with the source kept
+    j = ids[1]
+    against = OTHER if tracker.lean_role(j) == DOCTOR else DOCTOR                   # against the weak voice lean as well
+    tracker.sentences[j].said = tracker.lean_role(j)
+    assert tracker.apply_fill2(j, against) is True and tracker.role_of(tracker.sentences[j].gid) == against
 
 
 def test_without_a_group_of_that_role_the_second_answer_cannot_be_used():

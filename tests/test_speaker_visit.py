@@ -498,7 +498,7 @@ async def test_the_second_text_fill_does_nothing_unless_it_is_switched_on(tmp_pa
     assert session.speaker.map_doc()['settings']['text_fill2'] is False                      # the saved record says the switch was off
 
 
-async def test_the_second_text_fill_takes_an_answer_only_when_it_equals_the_first_one_and_is_asked_blind(tmp_path):
+async def test_the_second_text_fill_takes_the_role_it_answers_and_is_asked_blind(tmp_path):
     fake = FakeLLM()
     fake.script['speaker_fill'] = [says('醫師')] * 40                      # the first fill answers 醫師 for everything
     fake.script['speaker_fill2'] = [says('醫師')] * 40                     # ... and the second one says the same
@@ -508,10 +508,10 @@ async def test_the_second_text_fill_takes_an_answer_only_when_it_equals_the_firs
     stats = tracker.stats()
     assert fake.calls_for('speaker_fill2') and stats['text_filled2'] > 0 and service.fill2_stats['accepted'] == stats['text_filled2']
     assert service.map_doc()['settings']['text_fill2'] is True and service.map_doc()['fill2']['asked'] > 0
+    assert service.fill2_stats['accepted_agreeing'] == service.fill2_stats['accepted'] and service.fill2_stats['accepted_differing'] == 0
     for i, s in enumerate(tracker.sentences):
         if s.source == 'text2':
             assert s.said == 'doctor' and tracker.role_of(s.gid) == 'doctor'
-            assert s.lean is None or tracker.role_of(s.lean) == 'other'          # it overrode a voice that leaned the other way
     assert '醫師*:' in session.pipeline.snapshot().text                              # shown with the same star as the first fill
     stars = False
     for messages in fake.calls_for('speaker_fill2'):
@@ -523,17 +523,23 @@ async def test_the_second_text_fill_takes_an_answer_only_when_it_equals_the_firs
     assert stars                                                                    # the neighbours' text-filled labels are in view
     events = [e for e in session.log.events if e['type'] == 'speaker_fill2']
     assert events and sum(e['accepted'] for e in events) == service.fill2_stats['accepted']
+    assert all(e['agreeing'] + e['differing'] == e['accepted'] for e in events)
 
 
-async def test_a_second_answer_that_differs_from_the_first_leaves_the_sentence_unknown(tmp_path):
+async def test_a_second_answer_that_differs_from_the_first_is_taken_and_counted_apart(tmp_path):
     fake = FakeLLM()
     fake.script['speaker_fill'] = [says('醫師')] * 40
     fake.script['speaker_fill2'] = [says('患者或家屬')] * 40
     session, _ = await run_visit(tmp_path, fake, unknown_percentile=30.0, embedder=noisy_embedder, turns=60, text_fill2=True)
     await session.finish()
-    service = session.speaker
-    assert service.fill2_stats['asked'] > 0 and service.fill2_stats['rejected'] > 0
-    assert service.tracker.stats()['text_filled2'] == 0
+    service, tracker = session.speaker, session.speaker.tracker
+    stats = service.fill2_stats
+    assert stats['asked'] > 0 and stats['accepted'] > 0 and stats['accepted_differing'] == stats['accepted'] and stats['accepted_agreeing'] == 0
+    assert tracker.stats()['text_filled2'] == stats['accepted']
+    for s in tracker.sentences:
+        if s.source == 'text2':
+            assert s.said == 'doctor' and tracker.role_of(s.gid) == 'other'         # the second answer won
+    assert '患者或家屬*:' in session.pipeline.snapshot().text
 
 
 async def test_a_failing_second_fill_changes_nothing_and_does_not_stop_the_visit(tmp_path):

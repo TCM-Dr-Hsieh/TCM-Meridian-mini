@@ -355,7 +355,8 @@ def open_settings_dialog(app: AppState):
                                          value=draft.speaker.use_in_jobs)
                 speaker_fill = ui.switch('用 LLM 依上下文補標「不明」的句子（只在與聲音傾向一致時採用，標示 *）',
                                          value=draft.speaker.text_fill)
-                speaker_fill2 = ui.switch('二階補標：對一階補標後仍不明的句子再問 LLM 一次（不給第一次的答案），兩次答案一致才採用，標示 *（需先開啟上一項）',
+                speaker_fill2 = ui.switch('二階補標：對一階補標後仍不明的句子再問 LLM 一次（不告訴它第一次的答案，但讓它看到鄰句的 * 標記），'
+                                          '它答出醫師或患者或家屬就採用，標示 *（需先開啟上一項）',
                                           value=draft.speaker.text_fill2).mark('speaker-fill2')
                 speaker_fill2.bind_enabled_from(speaker_fill, 'value')
                 speaker_pct = ui.number('「不明」百分位（0–50，預設 15；越大越多「不明」、越少標錯）',

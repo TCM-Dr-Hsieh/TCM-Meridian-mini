@@ -202,13 +202,17 @@ def test_the_readable_log_has_a_clear_line_for_every_speaker_event():
               {'type': 'speaker_map_set', 'source': 'manual', 'roles': {'S1': '醫師', 'S2': '患者或家屬'}},
               {'type': 'speaker_fill', 'asked': 6, 'answered': 5, 'accepted': 2}, {'type': 'speaker_lock', 'locked': True},
               {'type': 'speaker_error', 'where': 'feed', 'error': 'boom'}, {'type': 'speaker_unavailable', 'reason': '找不到模型'},
-              {'type': 'speaker_rescored', 'promoted': 3, 'unknown': 20}]
+              {'type': 'speaker_rescored', 'promoted': 3, 'unknown': 20},
+              {'type': 'speaker_fill2', 'asked': 12, 'answered': 12, 'accepted': 11, 'agreeing': 8, 'differing': 3},
+              {'type': 'speaker_fill2', 'asked': 5, 'answered': 5, 'accepted': 5}]               # written before the split was recorded
     titles = [summarize_event(e)[0] for e in events]
     assert titles[0] == '聲音群建立（2 群）' and titles[1] == '新增聲音群（共 3 群）'
     assert titles[2] == '說話者對照表（醫師手動）：S1＝醫師、S2＝患者或家屬'
     assert titles[3] == '文字補標：問 6 句，答 5 句，採用 2 句' and titles[4] == '說話者對照表已鎖定'
     assert 'feed' in titles[5] and 'boom' in titles[5] and '找不到模型' in titles[6]
     assert titles[7] == '不明句重評分：補上聲音標記 3 句，仍不明 20 句'
+    assert titles[8] == '二階文字補標：問 12 句，答 12 句，採用 11 句（與一階答案相同 8、不同 3）'
+    assert titles[9] == '二階文字補標：問 5 句，答 5 句，採用 5 句'                         # an older event: no made-up "0 / 0"
     assert not any(t.startswith('speaker_') for t in titles)                   # nothing fell through to the raw event name
 
 
