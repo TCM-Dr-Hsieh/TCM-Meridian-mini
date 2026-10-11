@@ -9,9 +9,9 @@ from types import SimpleNamespace
 
 from nicegui import ui
 
-from ..config import AGENT_KEYS, AGENT_LABELS, MAX_VOCABULARY_CHARS, Endpoint, Settings, resolve_path
+from ..config import AGENT_KEYS, AGENT_LABELS, MAX_VOCABULARY_CHARS, Endpoint, Settings, SpeakerSettings, resolve_path
 from ..jobs import BusyError
-from ..speaker import DOCTOR, OTHER, UNKNOWN
+from ..speaker import DOCTOR, OTHER, UNKNOWN, tuning
 from ..speaker.embedder import availability
 from ..state import AppState, StateError, TEMPLATE_LABELS
 from ..voice.asr import validate_model_dir
@@ -275,6 +275,74 @@ def open_deid_dialog(app: AppState):
 
 
 # ---------------------------------------------------------------------------
+# speaker marking: the tunable numbers (SPEC 4.3, mini/speaker/tuning.py)
+# ---------------------------------------------------------------------------
+def tuning_summary(advanced: dict, unknown_percentile: float) -> str:
+    changed = len(advanced) + (1 if unknown_percentile != tuning.DEFAULTS['unknown_percentile'] else 0)
+    return f'目前有 {changed} 項參數不是預設值。' if changed else '目前全部使用預設值。'
+
+
+def open_tuning_dialog(state: dict, pct_field, note):
+    """The pop-up with every tunable number of speaker marking: value (default shown), what it does, what raising / lowering it does.
+
+    `state['advanced']` holds the overrides of the settings dialog being edited; "套用" checks the values the way saving does and writes
+    them back (and `unknown_percentile` into its own field of the settings dialog), "取消" throws the changes away. Nothing is saved until
+    the settings dialog's own 儲存設定."""
+    current = tuning.effective(state['advanced'], pct_field.value if pct_field.value is not None else tuning.DEFAULTS['unknown_percentile'])
+    inputs: dict = {}
+    dialog = ui.dialog().props('persistent')
+    with dialog, ui.card().classes('w-[1180px] max-w-full gap-2').style('max-height:92vh'):
+        ui.label('說話者標記的進階參數').classes('text-xl font-semibold')
+        ui.label('★ 為較重要的參數。每個欄位旁標示預設值（目前程式使用的值）；沒有改動的欄位不會寫進設定檔。多數參數互相牽連，建議一次只改一項，'
+                 '改完用一場看診或錄音驗證。預設值是在少數家人或朋友模擬看診的錄音上調的，樣本數非常少，僅供參考。').classes('hint')
+        with ui.scroll_area().classes('w-full').style('height:62vh'):
+            for stage in tuning.STAGES:
+                knobs = [k for k in tuning.KNOBS if k.stage == stage]
+                ui.label(stage).classes('text-base font-semibold mt-3')
+                with ui.grid(columns='230px 150px 1.2fr 1fr 1fr').classes('w-full gap-x-3 gap-y-2 items-start'):
+                    for head in ('參數', '數值（預設）', '功能', '調高', '調低'):
+                        ui.label(head).classes('hint font-medium')
+                    for knob in knobs:
+                        ui.label(('★ ' if knob.star else '') + knob.label).classes('font-medium' + (' text-amber-800' if knob.star else ''))
+                        with ui.column().classes('gap-0'):
+                            inputs[knob.key] = ui.number(value=current[knob.key], min=knob.low, max=knob.high, step=knob.step, format='%g') \
+                                .props('dense outlined').classes('w-32').mark(f'tuning-{knob.key}')
+                            ui.label(f'預設 {knob.default:g}（{knob.low:g}–{knob.high:g}）').classes('hint')
+                        ui.label(knob.what).classes('text-sm')
+                        ui.label(knob.higher).classes('text-sm')
+                        ui.label(knob.lower).classes('text-sm')
+        error = ui.label('').classes('text-red-700 text-sm')
+
+        def reset():
+            for key, field in inputs.items():
+                field.set_value(tuning.DEFAULTS[key])
+            error.set_text('')
+
+        def apply():
+            try:
+                missing = [tuning.BY_KEY[key].label for key, field in inputs.items() if field.value is None]
+                if missing:
+                    raise ValueError('這些欄位不可留空：' + '、'.join(missing))
+                raw = {key: field.value for key, field in inputs.items() if key != 'unknown_percentile'}
+                candidate = SpeakerSettings(unknown_percentile=inputs['unknown_percentile'].value, advanced=raw)
+                candidate.validate()                                 # the same check the settings dialog's save makes
+            except (ValueError, TypeError) as exc:
+                error.set_text(str(exc))
+                return
+            state['advanced'] = candidate.advanced
+            pct_field.set_value(candidate.unknown_percentile)
+            note.set_text(tuning_summary(candidate.advanced, candidate.unknown_percentile))
+            dialog.close()
+
+        with ui.row().classes('w-full justify-between'):
+            ui.button('全部還原成預設值', on_click=reset).props('flat').mark('tuning-reset')
+            with ui.row().classes('gap-2'):
+                ui.button('取消', on_click=dialog.close).props('flat').mark('tuning-cancel')
+                ui.button('套用', on_click=apply).mark('tuning-apply')
+    dialog.open()
+
+
+# ---------------------------------------------------------------------------
 # model settings
 # ---------------------------------------------------------------------------
 def open_settings_dialog(app: AppState):
@@ -282,6 +350,7 @@ def open_settings_dialog(app: AppState):
         ui.notify('看診中不可變更設定。', type='warning')
         return
     draft: Settings = deepcopy(app.settings)
+    tuning_state = {'advanced': dict(draft.speaker.advanced)}           # the speaker-marking numbers being edited (see open_tuning_dialog)
     dialog = ui.dialog().props('persistent')
     with dialog, ui.card().classes('w-[1100px] max-w-full gap-3'):
         ui.label('模型與設定').classes('text-xl font-semibold')
@@ -360,8 +429,14 @@ def open_settings_dialog(app: AppState):
                                           value=draft.speaker.text_fill2).mark('speaker-fill2')
                 speaker_fill2.bind_enabled_from(speaker_fill, 'value')
                 speaker_pct = ui.number('「不明」百分位（0–50，預設 15；越大越多「不明」、越少標錯）',
-                                        value=draft.speaker.unknown_percentile, min=0, max=50, step=1).classes('w-96')
+                                        value=draft.speaker.unknown_percentile, min=0, max=50, step=1).classes('w-96').mark('speaker-unknown-percentile')
                 speaker_result = ui.label('').classes('text-sm')
+                with ui.row().classes('items-center gap-3'):
+                    ui.button('進階參數…', icon='tune', on_click=lambda: open_tuning_dialog(tuning_state, speaker_pct, tuning_note)) \
+                        .props('outline').mark('speaker-tuning-button')
+                    tuning_note = ui.label(tuning_summary(draft.speaker.advanced, draft.speaker.unknown_percentile)).classes('hint')
+                    speaker_pct.on_value_change(lambda e: tuning_note.set_text(tuning_summary(
+                        tuning_state['advanced'], e.value if e.value is not None else tuning.DEFAULTS['unknown_percentile'])))
 
                 def check_speaker():
                     reason = availability(resolve_path(speaker_model.value or ''))
@@ -459,6 +534,7 @@ def open_settings_dialog(app: AppState):
                 new.speaker.use_in_jobs, new.speaker.text_fill = bool(speaker_jobs.value), bool(speaker_fill.value)
                 new.speaker.text_fill2 = bool(speaker_fill2.value) and bool(speaker_fill.value)
                 new.speaker.unknown_percentile = speaker_pct.value if speaker_pct.value is not None else 15.0
+                new.speaker.advanced = dict(tuning_state['advanced'])
                 for key in AGENT_KEYS:
                     u, s, m, t, x, c = rows[key]
                     new.agents[key] = Endpoint(u.value or '', s.value or '', m.value or '', t.value, x.value, c.value)

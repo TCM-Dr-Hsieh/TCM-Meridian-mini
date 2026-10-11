@@ -16,6 +16,19 @@ SENT_PAUSE = 0.5      # a pause this long ends a sentence
 
 
 @dataclass(frozen=True)
+class UnitParams:
+    """The five numbers above, as one value a visit can change (SPEC 4.3, `tuning.py`); the defaults are the constants."""
+    target: float = TARGET
+    pause: float = PAUSE
+    min_unit: float = MIN_UNIT
+    max_merged: float = MAX_MERGED
+    sent_pause: float = SENT_PAUSE
+
+
+DEFAULT_PARAMS = UnitParams()
+
+
+@dataclass(frozen=True)
 class Token:
     """One aligned unit of ASR text: a character range of a segment's `added` text and its audio time."""
     seg: int
@@ -34,14 +47,14 @@ def _span(tokens: list[Token], group: list[int]) -> tuple[float, float]:
     return tokens[group[0]].start, tokens[group[-1]].end
 
 
-def groups_of(tokens: list[Token]) -> list[list[int]]:
+def groups_of(tokens: list[Token], params: UnitParams = DEFAULT_PARAMS) -> list[list[int]]:
     """Merged groups of token indexes, tiling `tokens` in order. Groups still shorter than MIN_UNIT are kept here (the caller drops them)."""
     groups: list[list[int]] = []
     current: list[int] = []
     for i, token in enumerate(tokens):
         if current:
             last = tokens[current[-1]]
-            if last.sentence_end or token.start - last.end >= PAUSE or last.end - tokens[current[0]].start >= TARGET:
+            if last.sentence_end or token.start - last.end >= params.pause or last.end - tokens[current[0]].start >= params.target:
                 groups.append(current)
                 current = []
         current.append(i)
@@ -51,16 +64,16 @@ def groups_of(tokens: list[Token]) -> list[list[int]]:
     while k < len(pending):
         group = pending[k]
         start, end = _span(tokens, group)
-        if end - start < MIN_UNIT:
+        if end - start < params.min_unit:
             previous = result[-1] if result else None
             following = pending[k + 1] if k + 1 < len(pending) else None
             if (previous is not None and not tokens[previous[-1]].sentence_end
-                    and start - _span(tokens, previous)[1] <= PAUSE and end - _span(tokens, previous)[0] <= MAX_MERGED):
+                    and start - _span(tokens, previous)[1] <= params.pause and end - _span(tokens, previous)[0] <= params.max_merged):
                 result[-1] = previous + group
                 k += 1
                 continue
             if (following is not None and not tokens[group[-1]].sentence_end
-                    and _span(tokens, following)[0] - end <= PAUSE and _span(tokens, following)[1] - start <= MAX_MERGED):
+                    and _span(tokens, following)[0] - end <= params.pause and _span(tokens, following)[1] - start <= params.max_merged):
                 pending[k + 1] = group + following
                 k += 1
                 continue
@@ -69,9 +82,9 @@ def groups_of(tokens: list[Token]) -> list[list[int]]:
     return result
 
 
-def build_units(tokens: list[Token]) -> list[list[int]]:
-    """Units of a whole token list: the merged groups that last at least MIN_UNIT."""
-    return [g for g in groups_of(tokens) if _span(tokens, g)[1] - _span(tokens, g)[0] >= MIN_UNIT]
+def build_units(tokens: list[Token], params: UnitParams = DEFAULT_PARAMS) -> list[list[int]]:
+    """Units of a whole token list: the merged groups that last at least `min_unit`."""
+    return [g for g in groups_of(tokens, params) if _span(tokens, g)[1] - _span(tokens, g)[0] >= params.min_unit]
 
 
 class UnitStream:
@@ -81,7 +94,8 @@ class UnitStream:
     The result is the same as `build_units` over all the tokens at once (tested on random streams).
     """
 
-    def __init__(self):
+    def __init__(self, params: UnitParams = DEFAULT_PARAMS):
+        self.params = params
         self.tokens: list[Token] = []
         self.settled = 0             # tokens before this index belong to finished groups: no later token can change them
 
@@ -102,10 +116,10 @@ class UnitStream:
     def _emit(self, *, final: bool) -> list[list[int]]:
         base = self.settled
         tail = self.tokens[base:]
-        groups = groups_of(tail)
+        groups = groups_of(tail, self.params)
         done = groups if final else groups[:max(0, len(groups) - 2)]
         if final:
             self.settled = len(self.tokens)
         elif done:
             self.settled = base + groups[len(done)][0]
-        return [[base + i for i in g] for g in done if _span(tail, g)[1] - _span(tail, g)[0] >= MIN_UNIT]
+        return [[base + i for i in g] for g in done if _span(tail, g)[1] - _span(tail, g)[0] >= self.params.min_unit]

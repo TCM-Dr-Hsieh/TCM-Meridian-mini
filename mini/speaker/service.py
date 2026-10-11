@@ -10,13 +10,30 @@ from typing import Callable
 
 from ..config import Endpoint, SpeakerSettings
 from ..llm import CallFailed, LLMCaller, PRIORITY_BACKGROUND
-from . import BACKGROUND, DOCTOR, LABEL_NAMES, OTHER, TEXT_SOURCES, UNKNOWN, fill, roles
+from . import BACKGROUND, DOCTOR, LABEL_NAMES, OTHER, TEXT_SOURCES, UNKNOWN, fill, roles, tuning
 from .render import project, prompt_body, segment_runs
 from .tracker import Params, SpeakerTracker, group_name
-from .units import Token, ends_sentence
+from .units import Token, UnitParams, ends_sentence
 
 FINAL_PASS_SECONDS = 60.0         # the last role / fill pass at the end of a visit may not hold the visit open longer than this
 MARKS_NOTE = '說話者標記由程式自動判斷，可能有誤；「*」表示由上下文推測、較不可靠'
+
+
+def build_params(values: dict) -> Params:
+    """The tracker's numbers from the value of every knob (`tuning.effective`)."""
+    return Params(
+        unknown_percentile=float(values['unknown_percentile']), refit_seconds=float(values['refit_seconds']),
+        first_fit_units=int(values['first_fit_units']), min_group_share=float(values['min_group_share']),
+        min_group_units=int(values['min_group_units']), first_split_max_cos=float(values['first_split_max_cos']),
+        new_group_max_cos=float(values['new_group_max_cos']), new_group_share=float(values['new_group_share']),
+        new_group_window=float(values['new_group_window']), max_groups=int(values['max_groups']), far_cos=float(values['far_cos']),
+        clip=float(values['clip']), background_rel_db=float(values['background_rel_db']),
+        background_max_cos=float(values['background_max_cos']), quiet_gate_db=float(values['quiet_gate_db']),
+        quiet_gate_percentile=float(values['quiet_gate_percentile']), min_history=int(values['min_history']),
+        fill_after=int(values['fill_wait']), fill_batch=int(values['fill_batch']), fill_max_age=float(values['fill_max_age']),
+        fill2_batch=int(values['fill2_batch']), fill2_refits=int(values['fill2_refits']),
+        units=UnitParams(target=float(values['target']), pause=float(values['pause']), min_unit=float(values['min_unit']),
+                         max_merged=float(values['max_merged']), sent_pause=float(values['sent_pause'])))
 
 
 def window_tokens(index: int, selected, added_asr: str, added: str) -> list[Token]:
@@ -35,14 +52,17 @@ class SpeakerService:
                  segments: Callable[[], list], emit: Callable[..., object], on_change: Callable[[], None],
                  audio_t: Callable[[], float | None] = lambda: None):
         self.settings = settings
-        self.tracker = SpeakerTracker(embed, Params(unknown_percentile=settings.unknown_percentile))
+        values = tuning.effective(settings.advanced, settings.unknown_percentile)
+        self.tracker = SpeakerTracker(embed, build_params(values))
+        self._max_lines = int(values['max_lines'])
+        self._fill_chunk, self._fill_before, self._fill_after = int(values['fill_chunk']), int(values['fill_before']), int(values['fill_after'])
         self.caller = caller
         self._endpoint = endpoint
         self._segments = segments
         self._emit_event = emit
         self._on_change = on_change
         self._audio_t = audio_t
-        self.voter = roles.RoleVoter()
+        self.voter = roles.RoleVoter(lock_after=int(values['lock_after']))
         self.role_versions: list[dict] = []
         self.manual_events: list[dict] = []
         self.failed = ''
@@ -148,12 +168,27 @@ class SpeakerService:
                         'seconds': info.seconds, 'share': info.share, 'examples': [e for e in examples if e]})
         return out
 
+    def effective_tuning(self) -> dict:
+        """The value of every knob as the running objects hold it (not as the settings say): the log and the tests read what really ran."""
+        p, u = self.tracker.params, self.tracker.params.units
+        return {'target': u.target, 'pause': u.pause, 'min_unit': u.min_unit, 'max_merged': u.max_merged, 'sent_pause': u.sent_pause,
+                'refit_seconds': p.refit_seconds, 'quiet_gate_db': p.quiet_gate_db, 'quiet_gate_percentile': p.quiet_gate_percentile,
+                'first_fit_units': p.first_fit_units, 'min_group_share': p.min_group_share, 'min_group_units': p.min_group_units,
+                'first_split_max_cos': p.first_split_max_cos, 'new_group_max_cos': p.new_group_max_cos, 'new_group_share': p.new_group_share,
+                'new_group_window': p.new_group_window, 'max_groups': p.max_groups, 'far_cos': p.far_cos, 'clip': p.clip,
+                'unknown_percentile': p.unknown_percentile, 'min_history': p.min_history,
+                'lock_after': self.voter.lock_after, 'max_lines': self._max_lines,
+                'background_rel_db': p.background_rel_db, 'background_max_cos': p.background_max_cos,
+                'fill_wait': p.fill_after, 'fill_batch': p.fill_batch, 'fill_max_age': p.fill_max_age,
+                'fill_chunk': self._fill_chunk, 'fill_before': self._fill_before, 'fill_after': self._fill_after,
+                'fill2_batch': p.fill2_batch, 'fill2_refits': p.fill2_refits}
+
     def map_doc(self) -> dict:
         """`speaker/map.json`: no voiceprints, only the role maps, per-minute counts and the physician's manual actions."""
         return {'status': self.status, 'failed': self.failed, 'settings': {
                     'unknown_percentile': self.settings.unknown_percentile, 'text_fill': self.settings.text_fill,
                     'text_fill2': self.settings.text_fill2,
-                    'use_in_jobs': self.settings.use_in_jobs},
+                    'use_in_jobs': self.settings.use_in_jobs, 'tuning': tuning.changed(self.effective_tuning())},
                 'role_versions': self.role_versions, 'manual_events': self.manual_events,
                 'minutes': self.tracker.minutes, 'stats': self.tracker.stats(), 'fill': self.fill_stats, 'fill2': self.fill2_stats,
                 'groups': [{'name': g['name'], 'role': g['role'], 'units': g['units'], 'seconds': round(g['seconds'], 1),
@@ -248,7 +283,7 @@ class SpeakerService:
         tracker = self.tracker
         self._asked_roles_at = (len(tracker.minutes), tracker.groups_version)
         groups = list(range(tracker.group_count))
-        lines = roles.dialogue_lines(self._segments(), tracker)
+        lines = roles.dialogue_lines(self._segments(), tracker, limit=self._max_lines)
         if not lines:
             return
         base = self._prompt('roles', roles.load_prompt)
@@ -328,11 +363,11 @@ class SpeakerService:
         mark = tracker.mark_asked2 if second else tracker.mark_asked
         apply = tracker.apply_fill2 if second else tracker.apply_fill
         base = self._prompt('fill2' if second else 'fill', fill.load_prompt2 if second else fill.load_prompt)
-        for ask in fill.chunks(wanted):
+        for ask in fill.chunks(wanted, self._fill_chunk):
             if self.failed:
                 return
             mark(ask)                                 # asked once: a failed call leaves its sentences unknown rather than retrying forever
-            shown = fill.window(ask, tracker.stats()['decided'])
+            shown = fill.window(ask, tracker.stats()['decided'], self._fill_chunk, self._fill_before, self._fill_after)
             rows, previous_end = [], None
             for i in shown:
                 sentence = tracker.sentences[i]

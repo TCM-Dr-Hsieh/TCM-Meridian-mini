@@ -20,7 +20,7 @@ import numpy as np
 
 from . import BACKGROUND, BACKGROUND_GID, DOCTOR, OTHER, UNKNOWN
 from .mathutil import kmeans, tied_two_component, unit_rows
-from .units import SENT_PAUSE, Token, UnitStream
+from .units import DEFAULT_PARAMS as DEFAULT_UNIT_PARAMS, Token, UnitParams, UnitStream
 
 RATE = 16000
 MIN_HISTORY = 8              # past sentences needed before the percentile is taken from the past
@@ -49,6 +49,13 @@ class Params:
     background_max_cos: float = 0.425    # ... AND fitting no voice group better than this (mean best cosine of its units); -inf / 0 switch it off
     quiet_gate_db: float = 10.0          # a unit this much quieter than the `quiet_gate_percentile` level of all units is left out of the group fit
     quiet_gate_percentile: float = 75.0  # (inf switches it off); such units are still assigned to the nearest group afterwards
+    min_history: int = MIN_HISTORY       # past sentences needed before the percentile is taken from the past
+    fill_after: int = FILL_AFTER         # a text fill waits until this many later sentences are decided (they are its context)
+    fill_batch: int = FILL_BATCH         # ... and until this many sentences are waiting, or the oldest has waited `fill_max_age` seconds
+    fill_max_age: float = FILL_MAX_AGE
+    fill2_batch: int = FILL2_BATCH       # the second text fill waits until this many sentences are waiting for it (the final pass takes what is left)
+    fill2_refits: int = FILL2_REFITS     # ... and each of them went to the first text fill at least this many refits (minutes) ago
+    units: UnitParams = DEFAULT_UNIT_PARAMS      # how the text is cut into units and sentences
 
 
 class AudioBuffer:
@@ -133,7 +140,7 @@ class SpeakerTracker:
         self.params = params or Params()
         self._lock = threading.RLock()
         self.audio = AudioBuffer()
-        self.stream = UnitStream()
+        self.stream = UnitStream(self.params.units)
         self.units: list[Unit] = []
         self.sentences: list[Sentence] = []
         self._sentence_of: list[int] = []            # token index -> sentence index
@@ -284,7 +291,7 @@ class SpeakerTracker:
 
     def _add_token(self, i: int):
         token = self.stream.tokens[i]
-        if self.sentences and not self.sentences[-1].closed and token.start - self.stream.tokens[i - 1].end >= SENT_PAUSE:
+        if self.sentences and not self.sentences[-1].closed and token.start - self.stream.tokens[i - 1].end >= self.params.units.sent_pause:
             self.sentences[-1].closed = True
         if not self.sentences or self.sentences[-1].closed:
             self.sentences.append(Sentence(i, i, token.start, token.end))
@@ -438,7 +445,7 @@ class SpeakerTracker:
         """Another room's voices: clearly quieter than the doctor AND unlike every voice group (a conservative two-cue rule; on the 15
         labelled recordings it caught about 73% of the background words and took none of the doctor's or the patient's; a weak-voiced
         patient sounds like background from cosine 0.45 up, so the threshold stays below that, SPEC 4.3). Needs a named doctor group (the yardstick for "quieter") and a voiceprint."""
-        if self._ref_level is None or self._centres is None:
+        if self._ref_level is None or self._centres is None or self.params.background_max_cos <= 0:     # (<= 0: switched off; a cosine can be negative)
             return False
         units = [self.units[n] for n in s.units if self.units[n].vec is not None and np.isfinite(self.units[n].level)]
         if not units:
@@ -536,7 +543,7 @@ class SpeakerTracker:
         is not given to the text fill again. Sentences that are already labelled, by voice or by text, are never touched."""
         doctor = self._doctor_groups()
         other = [g for g in range(self.group_count) if g not in doctor]
-        if self._calibration is None or not doctor or not other or len(self._history) < MIN_HISTORY:
+        if self._calibration is None or not doctor or not other or len(self._history) < self.params.min_history:
             return set()
         threshold = float(np.percentile(self._history, self.params.unknown_percentile))
         changed, promoted = set(), 0
@@ -573,10 +580,10 @@ class SpeakerTracker:
             return
         scores = {i: self._score(self.sentences[i], doctor, other) for i in ready}
         magnitudes = [abs(v[0]) for v in scores.values() if v is not None]
-        if not self.finished and len(self._history) + len(magnitudes) < MIN_HISTORY:
+        if not self.finished and len(self._history) + len(magnitudes) < self.params.min_history:
             return                                               # too little to judge "weak" against: wait for more sentences
         percentile = self.params.unknown_percentile
-        seeded = len(self._history) < MIN_HISTORY
+        seeded = len(self._history) < self.params.min_history
         fixed = float(np.percentile(magnitudes, percentile)) if seeded and magnitudes else 0.0
         if seeded:
             self._history.extend(magnitudes)                     # the first batch is judged against itself
@@ -600,14 +607,14 @@ class SpeakerTracker:
         with self._lock:
             return [i for i in range(self._cursor)
                     if self.sentences[i].gid is None and not self.sentences[i].asked and not self.sentences[i].background
-                    and (final or self._cursor - 1 - i >= FILL_AFTER)]
+                    and (final or self._cursor - 1 - i >= self.params.fill_after)]
 
     def fill_due(self, wanted: list[int]) -> bool:
         """Enough waiting sentences, or the oldest has waited long enough, to be worth one LLM call."""
         if not wanted:
             return False
         newest = self.sentences[self._cursor - 1].t1
-        return len(wanted) >= FILL_BATCH or newest - self.sentences[wanted[0]].t1 >= FILL_MAX_AGE
+        return len(wanted) >= self.params.fill_batch or newest - self.sentences[wanted[0]].t1 >= self.params.fill_max_age
 
     def mark_asked(self, indexes: list[int], asked: bool = True):
         with self._lock:
@@ -631,16 +638,16 @@ class SpeakerTracker:
     # ------------------------------------------------------------------ second text fill
     def fill2_candidates(self) -> list[int]:
         """Unknown sentences the first text fill answered without being accepted, not yet shown to the second fill, whose first
-        answer came back at least FILL2_REFITS refits ago (the model and the neighbours' labels have moved on since; a refit that
+        answer came back at least `fill2_refits` refits ago (the model and the neighbours' labels have moved on since; a refit that
         happened while the first request was out does not count)."""
         with self._lock:
             refits = len(self.minutes)
             return [i for i in range(self._cursor)
                     if self.sentences[i].gid is None and self.sentences[i].said and not self.sentences[i].asked2
-                    and not self.sentences[i].background and refits >= self.sentences[i].said_refit + FILL2_REFITS]
+                    and not self.sentences[i].background and refits >= self.sentences[i].said_refit + self.params.fill2_refits]
 
     def fill2_due(self, wanted: list[int]) -> bool:
-        return len(wanted) >= FILL2_BATCH
+        return len(wanted) >= self.params.fill2_batch
 
     def mark_asked2(self, indexes: list[int], asked: bool = True):
         with self._lock:

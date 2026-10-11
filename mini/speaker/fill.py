@@ -25,21 +25,21 @@ def load_prompt2() -> str:
     return (PROMPTS_DIR / PROMPT_FILE2).read_text(encoding='utf-8')
 
 
-def chunks(ids: list[int]) -> list[list[int]]:
-    """Group sentence numbers into runs that start within CHUNK sentences of each other."""
+def chunks(ids: list[int], size: int = CHUNK) -> list[list[int]]:
+    """Group sentence numbers into runs that start within `size` sentences of each other."""
     out: list[list[int]] = []
     for i in sorted(ids):
-        if out and i < out[-1][0] + CHUNK:
+        if out and i < out[-1][0] + size:
             out[-1].append(i)
         else:
             out.append([i])
     return out
 
 
-def window(ask: list[int], decided: int) -> range:
-    """The sentences shown as context for one call: BEFORE before the first asked, AFTER after the window, decided ones only."""
+def window(ask: list[int], decided: int, size: int = CHUNK, before: int = BEFORE, after: int = AFTER) -> range:
+    """The sentences shown as context for one call: `before` before the first asked, `after` after the window, decided ones only."""
     start = ask[0]
-    return range(max(0, start - BEFORE), min(decided, start + CHUNK + AFTER))
+    return range(max(0, start - before), min(decided, start + size + after))
 
 
 def request_payload(ask: list[int], rows: list[dict]) -> str:

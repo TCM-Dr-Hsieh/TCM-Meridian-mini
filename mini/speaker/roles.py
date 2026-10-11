@@ -81,6 +81,7 @@ class RoleVoter:
     agree: dict[int, int] = field(default_factory=dict)      # per group: answers in a row that agree with its role in `current`
     sure: set[int] = field(default_factory=set)              # the groups whose role in `current` is confirmed
     groups: int = 0                                          # how many voice groups exist (a group nobody named is still waiting)
+    lock_after: int = LOCK_AFTER                             # agreeing answers in a row after which the model is asked no more
 
     @property
     def confirmed_roles(self) -> dict[int, str]:
@@ -103,7 +104,7 @@ class RoleVoter:
 
     @property
     def locked(self) -> bool:
-        return self.confirmed >= LOCK_AFTER and self.usable and not self.pending_groups
+        return self.confirmed >= self.lock_after and self.usable and not self.pending_groups
 
     @property
     def wants_answer(self) -> bool:

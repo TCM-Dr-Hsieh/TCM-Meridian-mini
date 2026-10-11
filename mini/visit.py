@@ -211,7 +211,8 @@ class VisitSession:
             self.log.emit('speaker_unavailable', reason=str(exc))
             return None
         self.log.emit('speaker_started', model=config.model_path, unknown_percentile=config.unknown_percentile,
-                      text_fill=config.text_fill, text_fill2=config.text_fill2, use_in_jobs=config.use_in_jobs)
+                      text_fill=config.text_fill, text_fill2=config.text_fill2, use_in_jobs=config.use_in_jobs,
+                      tuning=config.advanced)
         return SpeakerService(
             settings=config, embed=embed, caller=self._transcript_caller,
             endpoint=lambda: self.settings.agents['transcript_corrector'],

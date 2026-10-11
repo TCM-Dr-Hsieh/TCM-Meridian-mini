@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .fileio import atomic_write_json
+from .speaker.tuning import validate_advanced
 
 DEFAULT_HOST = '0.0.0.0'      # all interfaces: reachable from the LAN and through a tunnel (e.g. cloudflared)
 DEFAULT_PORT = 5050
@@ -173,6 +174,7 @@ class SpeakerSettings:
     text_fill: bool = True                           # an LLM decides some of the sentences the voice could not
     text_fill2: bool = False                         # ... and a second, blind pass over what is still unknown: two equal answers decide
     unknown_percentile: float = 15.0                 # higher = more "不明", fewer mistakes
+    advanced: dict = field(default_factory=dict)     # the other tunable numbers (SPEC 4.3, `speaker/tuning.py`): only those that differ from the default
 
     def validate(self):
         self.enabled = bool(self.enabled)
@@ -183,6 +185,7 @@ class SpeakerSettings:
         if not self.model_path:
             raise ValueError('說話者聲紋模型路徑不可留空。')
         self.unknown_percentile = _number(self.unknown_percentile, '「不明」百分位', 0, 50)
+        self.advanced = validate_advanced(self.advanced, _number)
 
 
 @dataclass
