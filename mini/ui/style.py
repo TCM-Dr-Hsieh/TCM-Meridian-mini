@@ -14,6 +14,9 @@ body {background:#eef2f0; color:#1f2d27; font-family:"Segoe UI","Microsoft Jheng
 .status-bar .job {font-weight:600; color:#1b4332;}
 .status-bar .job.failed {color:#b3261e;}
 .cols {flex:1 1 0; min-height:0; display:grid; grid-template-columns:1.25fr 1fr 0.9fr; gap:10px; width:100%;}
+.zoom-btn {margin-left:auto;}
+.zoom-panel {z-index:2000; border:2px solid #2d6a4f; box-shadow:0 8px 28px #1b433238;}
+.zoom-advice {flex:1 1 0; min-height:0; display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px;}
 .work-col {display:flex; flex-direction:column; gap:10px; min-height:0; min-width:0;}
 .panel {background:#fff; border:1px solid #d5dfda; border-radius:12px; padding:8px 12px; display:flex;
         flex-direction:column; min-height:0; min-width:0; box-shadow:0 1px 6px #1b433210;}
@@ -65,7 +68,20 @@ body {background:#eef2f0; color:#1f2d27; font-family:"Segoe UI","Microsoft Jheng
 .float-body {flex:1 1 0; min-height:0; overflow:auto; padding:10px 14px;}
 .patient-text {white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.75; font-size:14px; user-select:text; cursor:text;}
 .patient-text.empty {color:#9aa8a1;}
-@media (max-width: 860px) {.cols {grid-template-columns:1fr; overflow:auto;} .work-col {min-height:70vh;}}
+/* An enlarged panel (今日病歷, 問診建議: left + middle column; 分析與處置: middle + right column) is a grid item laid over the
+   columns it covers, so it follows the window; it sits under the floating panels (z-index 3000) and the dialogs. */
+@media (min-width: 861px) {
+  .cols {grid-template-rows:minmax(0, 1fr);}
+  .work-col.c1 {grid-column:1; grid-row:1;} .work-col.c2 {grid-column:2; grid-row:1;} .work-col.c3 {grid-column:3; grid-row:1;}
+  .zoom-panel {grid-row:1;}
+  .zoom-panel.left {grid-column:1 / span 2;}
+  .zoom-panel.right {grid-column:2 / span 2;}
+}
+@media (max-width: 860px) {
+  .cols {grid-template-columns:1fr; overflow:auto;} .work-col {min-height:70vh;}
+  .zoom-panel {position:fixed; left:10px; right:10px; top:120px; bottom:10px;}
+  .zoom-advice {grid-template-columns:1fr; overflow:auto;}
+}
 '''
 
 JS = '''
@@ -82,6 +98,11 @@ window.miniScrollToEnd = function (id) {
   el.dataset.miniScroll = '1';
   if (window.miniFollow) el.scrollTop = el.scrollHeight;
 };
+// Esc puts an enlarged panel back, unless a dialog or a menu is open (Esc belongs to it then).
+document.addEventListener('keydown', function (event) {
+  if (event.key !== 'Escape' || event.defaultPrevented || document.querySelector('.q-dialog, .q-menu')) return;
+  if (typeof emitEvent === 'function') emitEvent('mini_zoom_escape');
+});
 window.miniCopy = async function (text) {
   // navigator.clipboard only exists in a secure context (https or localhost). A plain-http LAN address such as
   // http://192.168.1.20:5050 is not one, so fall back to the legacy copy command there.

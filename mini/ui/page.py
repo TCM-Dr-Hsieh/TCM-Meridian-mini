@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import html
+import inspect
 import json
 import time
 from pathlib import Path
@@ -30,14 +32,38 @@ def _placeholder(text: str) -> str:
     return f'<span class="empty">{html.escape(text)}</span>'
 
 
+def only_for(kind: str):
+    """An action of the `kind` panel (note | analysis | advice) runs only when no panel is enlarged or this one is, whatever the
+    action does (change the visit, copy, open a dialog). The small panels are paused behind an enlarged one by disabling their
+    buttons, and NiceGUI already drops the clicks of a disabled button; this is the second line, independent of any button's
+    enabled flag, for a call that does not come through such a button."""
+    def decorate(fn):
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def guarded(self, *args, **kwargs):
+                if self.zoom in (None, kind):
+                    return await fn(self, *args, **kwargs)
+                return None
+        else:
+            @functools.wraps(fn)
+            def guarded(self, *args, **kwargs):
+                if self.zoom in (None, kind):
+                    return fn(self, *args, **kwargs)
+                return None
+        return guarded
+    return decorate
+
+
 class MainPage:
     def __init__(self, app: AppState):
         self.app = app
         self.note_mode = 'browse'            # browse | diff | edit
         self.analysis_editing = False
         self.patient_open = False            # the floating 患者資訊 panel; a reloaded page starts with it closed
+        self.zoom: str | None = None         # the enlarged panel on screen: note | analysis | advice (one at a time); a reloaded page starts without
         self._sigs: dict[str, object] = {}
         self.w = SimpleNamespace()
+        self.z = {kind: SimpleNamespace() for kind in ('note', 'analysis', 'advice')}     # the widgets of the enlarged panels
         self.build()
         ui.timer(0.3, self.tick)
 
@@ -47,6 +73,7 @@ class MainPage:
         ui.add_head_html(f'<script>{JS}</script>')
         ui.add_head_html(f'<script src="{REMOTE_JS_URL}?v=1"></script>')
         ui.on('mini_remote', self.on_remote_event)
+        ui.on('mini_zoom_escape', lambda _=None: self.close_zoom())
         ui.colors(primary='#2d6a4f', secondary='#52665d', accent='#c58d23', positive='#2e7d64')
         w = self.w
         with ui.element('div').classes('shell'):
@@ -94,21 +121,39 @@ class MainPage:
                 w.status = ui.label('').classes('grow')
                 w.job = ui.label('').classes('job')
             with ui.element('div').classes('cols'):
-                with ui.element('div').classes('work-col'):
+                with ui.element('div').classes('work-col c1'):
                     self.build_note_panel()
                     self.build_analysis_panel()
-                with ui.element('div').classes('work-col'):
+                with ui.element('div').classes('work-col c2'):
                     self.build_advice_panel()
-                with ui.element('div').classes('work-col'):
+                with ui.element('div').classes('work-col c3'):
                     self.build_transcript_panel()
+                # The enlarged panels lie over the columns they cover (CSS grid), hidden until their 放大 button is pressed.
+                self.build_note_panel(zoom=True)
+                self.build_analysis_panel(zoom=True)
+                self.build_advice_panel(zoom=True)
         self.build_patient_panel()
         self.render_all()
         self.update_status()
         self.update_controls()
 
-    def build_note_panel(self):
-        w = self.w
-        with ui.element('div').classes('panel g3'):
+    def zoom_button(self, w, kind: str, zoom: bool):
+        """The 放大 button at the end of a panel's header; in the enlarged panel it is the 縮小 button."""
+        if zoom:
+            w.btn_zoom = ui.button('縮小', icon='close_fullscreen', on_click=self.close_zoom) \
+                .props('dense no-caps outline').classes('zoom-btn').tooltip('縮小回原本的畫面（Esc）').mark(f'zoom-close-{kind}')
+        else:                                           # one panel's namespace holds all three of the small panels' buttons
+            setattr(w, f'btn_zoom_{kind}', ui.button('放大', icon='open_in_full', on_click=lambda: self.open_zoom(kind))
+                    .props('dense no-caps outline').classes('zoom-btn').tooltip('放大成彈出視窗').mark(f'zoom-open-{kind}'))
+
+    def hidden_root(self, w, root):
+        """The enlarged panels start hidden; `root` is what is shown and hidden."""
+        w.root = root
+        root.set_visibility(False)
+
+    def build_note_panel(self, zoom: bool = False):
+        w = self.z['note'] if zoom else self.w
+        with ui.element('div').classes('panel zoom-panel left' if zoom else 'panel g3') as root:
             with ui.element('div').classes('panel-head'):
                 ui.label('今日病歷').classes('panel-title')
                 w.btn_browse = ui.button('瀏覽', on_click=lambda: self.set_note_mode('browse')).props('dense no-caps')
@@ -123,14 +168,17 @@ class MainPage:
                 w.btn_copy_note = ui.button(icon='content_copy', on_click=self.copy_note).props('dense flat round') \
                     .tooltip('複製（去來源標籤）')
                 w.note_version = ui.label('').classes('version-label')
+                self.zoom_button(w, 'note', zoom)
             with ui.element('div').classes('panel-body') as w.note_body:
                 w.note_html = ui.html('', sanitize=False)
             w.note_editor = ui.textarea().props('outlined').classes('editor w-full')
             w.note_editor.set_visibility(False)
+        if zoom:
+            self.hidden_root(w, root)
 
-    def build_analysis_panel(self):
-        w = self.w
-        with ui.element('div').classes('panel g2'):
+    def build_analysis_panel(self, zoom: bool = False):
+        w = self.z['analysis'] if zoom else self.w
+        with ui.element('div').classes('panel zoom-panel right' if zoom else 'panel g2') as root:
             with ui.element('div').classes('panel-head'):
                 ui.label('分析與處置').classes('panel-title')
                 w.btn_at_prev = ui.button(icon='chevron_left', on_click=lambda: self.nav_analysis(-1)).props('dense flat round')
@@ -141,27 +189,43 @@ class MainPage:
                     .props('dense no-caps color=positive')
                 w.btn_at_cancel = ui.button('放棄', icon='close', on_click=lambda: self.leave_analysis_edit(False)) \
                     .props('dense no-caps flat')
-                w.btn_process = ui.button('教授過程', icon='groups', on_click=lambda: dialogs.open_process_dialog(self.app)) \
+                w.btn_process = ui.button('教授過程', icon='groups', on_click=self.open_process) \
                     .props('dense no-caps outline')
                 w.btn_copy_at = ui.button(icon='content_copy', on_click=self.copy_analysis).props('dense flat round') \
                     .tooltip('複製')
+                self.zoom_button(w, 'analysis', zoom)
             with ui.element('div').classes('panel-body') as w.at_body:
                 w.at_md = ui.markdown('', extras=['fenced-code-blocks', 'tables'])
             w.at_editor = ui.textarea().props('outlined').classes('editor w-full')
             w.at_editor.set_visibility(False)
+        if zoom:
+            self.hidden_root(w, root)
 
-    def build_advice_panel(self):
-        w = self.w
-        with ui.element('div').classes('panel'):
-            with ui.element('div').classes('panel-head').style('margin-bottom:0'):
+    ADVICE_SECTIONS = (('western_ddx', '建議西醫疾病鑑別診斷'), ('tcm_ddx', '建議中醫證型鑑別診斷'),
+                       ('next_questions', '建議提出的問診問題'))
+
+    def build_advice_panel(self, zoom: bool = False):
+        """Read-only. Small: a header panel and three stacked sections. Enlarged: one panel, the sections side by side."""
+        w = self.z['advice'] if zoom else self.w
+        w.advice_md = {}
+        with ui.element('div').classes('panel zoom-panel left' if zoom else 'panel') as root:
+            with ui.element('div').classes('panel-head').style('' if zoom else 'margin-bottom:0'):
                 ui.label('問診建議').classes('panel-title')
                 w.btn_ad_prev = ui.button(icon='chevron_left', on_click=lambda: self.nav_advice(-1)).props('dense flat round')
                 w.ad_label = ui.label('').classes('version-label')
                 w.btn_ad_next = ui.button(icon='chevron_right', on_click=lambda: self.nav_advice(1)).props('dense flat round')
-        w.advice_md = {}
-        for key, title in (('western_ddx', '建議西醫疾病鑑別診斷'), ('tcm_ddx', '建議中醫證型鑑別診斷'),
-                           ('next_questions', '建議提出的問診問題')):
-            with ui.element('div').classes('panel g1'):
+                self.zoom_button(w, 'advice', zoom)
+            if zoom:
+                with ui.element('div').classes('zoom-advice'):
+                    self.build_advice_sections(w, 'panel')
+        if zoom:
+            self.hidden_root(w, root)
+        else:
+            self.build_advice_sections(w, 'panel g1')
+
+    def build_advice_sections(self, w, classes: str):
+        for key, title in self.ADVICE_SECTIONS:
+            with ui.element('div').classes(classes):
                 ui.label(title).classes('panel-title')
                 with ui.element('div').classes('panel-body'):
                     w.advice_md[key] = ui.markdown('', extras=['fenced-code-blocks', 'tables'])
@@ -371,26 +435,69 @@ class MainPage:
             return
         self.app.set_script_mode('original' if self.app.script_mode == mode else mode)
 
+    # -- enlarged panels -------------------------------------------------------
+    def open_zoom(self, kind: str):
+        """Enlarge one panel (only one at a time, only during a visit, not while something is being edited). The panels
+        behind it are paused (update_controls); the enlarged one has all the functions of the small one."""
+        if self.zoom is not None or self.app.phase != 'visiting' or self.editing():
+            return
+        self.zoom = kind
+        self.z[kind].root.set_visibility(True)
+        self.render_panels()
+        self.update_controls()
+
+    def zoom_locked(self) -> bool:
+        """The enlarged panel is being edited: it goes back only after 完成 / 放棄 (as every other button waits for them)."""
+        return (self.zoom == 'note' and self.note_mode == 'edit') or (self.zoom == 'analysis' and self.analysis_editing)
+
+    def close_zoom(self):
+        if self.zoom is None or self.zoom_locked():
+            return
+        self.drop_zoom()
+        self.render_panels()
+        self.update_controls()
+
+    def drop_zoom(self):
+        """Put the enlarged panel away. Only when the visit is over can an edit still be open in it: that edit is dropped."""
+        kind, self.zoom = self.zoom, None
+        if kind is None:
+            return
+        self.z[kind].root.set_visibility(False)
+        if kind == 'note' and self.note_mode == 'edit':
+            self.note_mode = 'browse'
+        if kind == 'analysis':
+            self.analysis_editing = False
+
+    def note_host(self):
+        """The note panel that holds the editor: the enlarged one while it is open."""
+        return self.z['note'] if self.zoom == 'note' else self.w
+
+    def analysis_host(self):
+        return self.z['analysis'] if self.zoom == 'analysis' else self.w
+
     # -- note ---------------------------------------------------------------
+    @only_for('note')
     def set_note_mode(self, mode: str):
         self.note_mode = mode
         self.render_all()
         self.update_controls()
 
+    @only_for('note')
     def enter_note_edit(self):
         if self.visit is None or self.busy():
             return
         if self.app.script_mode != 'original':
             self.app.set_script_mode('original')
             ui.notify('已還原為原文字形再進入修改。')
-        self.w.note_editor.set_value(self.visit.note.current_note())
+        self.note_host().note_editor.set_value(self.visit.note.current_note())
         self.note_mode = 'edit'
         self.render_all()
         self.update_controls()
 
+    @only_for('note')
     def leave_note_edit(self, save: bool):
         if save and self.visit:
-            changed = self.safe(self.visit.edit_note_manual, self.w.note_editor.value or '')
+            changed = self.safe(self.visit.edit_note_manual, self.note_host().note_editor.value or '')
             if changed is None:
                 return
             ui.notify('修改已保存（新增行已標記 [醫師手動]）。' if changed else '未偵測到變更。',
@@ -399,23 +506,28 @@ class MainPage:
         self.render_all()
         self.update_controls()
 
+    @only_for('note')
     def undo_note(self):
         if self.visit and self.safe(self.visit.undo_note):
             ui.notify(f'回到版本 {self.visit.note.current_index + 1}')
 
+    @only_for('note')
     def redo_note(self):
         if self.visit and self.safe(self.visit.redo_note):
             ui.notify(f'前進到版本 {self.visit.note.current_index + 1}')
 
+    @only_for('note')
     async def copy_note(self):
         if self.visit:
             await self.copy_text(self.app.display(strip_citations(self.visit.note.current_note())), '今日病歷（已去來源標籤）')
 
     # -- analysis -------------------------------------------------------------
+    @only_for('analysis')
     def nav_analysis(self, step: int):
         if self.visit and not self.analysis_editing:
             self.visit.set_analysis_index(self.visit.analysis_index + step)
 
+    @only_for('analysis')
     def enter_analysis_edit(self):
         v = self.visit
         if v is None or self.busy():
@@ -424,25 +536,32 @@ class MainPage:
             self.app.set_script_mode('original')
             ui.notify('已還原為原文字形再進入修改。')
         shown = v.analysis[v.analysis_index].final_at if 0 <= v.analysis_index < len(v.analysis) else ''
-        self.w.at_editor.set_value(shown)
+        self.analysis_host().at_editor.set_value(shown)
         self.analysis_editing = True
         self.render_all()
         self.update_controls()
 
+    @only_for('analysis')
     def leave_analysis_edit(self, save: bool):
         if save and self.visit:
-            version = self.safe(self.visit.edit_analysis_manual, self.w.at_editor.value or '')
+            version = self.safe(self.visit.edit_analysis_manual, self.analysis_host().at_editor.value or '')
             ui.notify('已新增醫師手動修改版本。' if version else '未偵測到變更。',
                       type='positive' if version else 'info')
         self.analysis_editing = False
         self.render_all()
         self.update_controls()
 
+    @only_for('analysis')
+    def open_process(self):
+        dialogs.open_process_dialog(self.app)
+
+    @only_for('analysis')
     async def copy_analysis(self):
         v = self.visit
         if v and 0 <= v.analysis_index < len(v.analysis):
             await self.copy_text(self.app.display(v.analysis[v.analysis_index].final_at), '分析與處置')
 
+    @only_for('advice')
     def nav_advice(self, step: int):
         if self.visit:
             self.visit.set_advice_index(self.visit.advice_index + step)
@@ -468,16 +587,16 @@ class MainPage:
         v = self.visit
         current = v.note.get_current() if v else None
         return (id(v), current['id'] if current else None, v.note.current_index if v else -1,
-                len(v.note.snapshots) if v else 0, self.note_mode, self.app.script_mode)
+                len(v.note.snapshots) if v else 0, self.note_mode, self.app.script_mode, self.zoom == 'note')
 
     def analysis_signature(self):
         v = self.visit
         return (id(v), v.analysis_index if v else -1, len(v.analysis) if v else 0,
-                self.analysis_editing, self.app.script_mode)
+                self.analysis_editing, self.app.script_mode, self.zoom == 'analysis')
 
     def advice_signature(self):
         v = self.visit
-        return (id(v), v.advice_index if v else -1, len(v.advice) if v else 0, self.app.script_mode)
+        return (id(v), v.advice_index if v else -1, len(v.advice) if v else 0, self.app.script_mode, self.zoom == 'advice')
 
     def patient_signature(self):
         return (id(self.visit), self.patient_source(), self.app.script_mode)
@@ -488,9 +607,31 @@ class MainPage:
         return (id(v), pipeline.version if pipeline else -1, pipeline.finished if pipeline else None,
                 self.app.script_mode)
 
+    def note_views(self):
+        """(widgets, mode) of each note panel on screen. The enlarged one holds the editor while it is open; the panel
+        behind it then shows the note as it stands."""
+        views = [(self.w, 'browse' if self.note_mode == 'edit' and self.zoom == 'note' else self.note_mode)]
+        if self.zoom == 'note':
+            views.append((self.z['note'], self.note_mode))
+        return views
+
+    def analysis_views(self):
+        """(widgets, editing) of each analysis panel on screen, as note_views."""
+        views = [(self.w, self.analysis_editing and self.zoom != 'analysis')]
+        if self.zoom == 'analysis':
+            views.append((self.z['analysis'], self.analysis_editing))
+        return views
+
+    def advice_views(self):
+        return [self.w] + ([self.z['advice']] if self.zoom == 'advice' else [])
+
     def render_note(self):
-        w, v, app = self.w, self.visit, self.app
-        editing = self.note_mode == 'edit'
+        for w, mode in self.note_views():
+            self.render_note_into(w, mode)
+
+    def render_note_into(self, w, mode: str):
+        v, app = self.visit, self.app
+        editing = mode == 'edit'
         w.note_body.set_visibility(not editing)
         w.note_editor.set_visibility(editing)
         if v is None:
@@ -501,7 +642,7 @@ class MainPage:
         w.note_version.set_text(
             f'版本 {v.note.current_index + 1}/{len(v.note.snapshots)} · 來源：{snapshot["source"]} · '
             f'{snapshot["timestamp"][11:19]}' + (f' · t+{format_clock(snapshot["t"])}' if snapshot.get('t') is not None else ''))
-        if self.note_mode == 'diff':
+        if mode == 'diff':
             previous = v.note.get_previous()
             if previous is None:
                 w.note_html.set_content(_placeholder('（無前一版可比較）'))
@@ -509,14 +650,18 @@ class MainPage:
                 index = v.note.current_index
                 w.note_html.set_content(diff_html(app.display(previous['note']), app.display(snapshot['note']),
                                                   f'版本 {index} → 版本 {index + 1}'))
-        elif self.note_mode == 'browse':
+        elif mode == 'browse':
             text = app.display(strip_citations(snapshot['note']))
             w.note_html.set_content(simple_md_render(text) if text.strip() else EMPTY)
 
     def render_analysis(self):
-        w, v, app = self.w, self.visit, self.app
-        w.at_body.set_visibility(not self.analysis_editing)
-        w.at_editor.set_visibility(self.analysis_editing)
+        for w, editing in self.analysis_views():
+            self.render_analysis_into(w, editing)
+
+    def render_analysis_into(self, w, editing: bool):
+        v, app = self.visit, self.app
+        w.at_body.set_visibility(not editing)
+        w.at_editor.set_visibility(editing)
         if v is None or not v.analysis:
             w.at_md.set_content('*（尚無分析；按「整體分析」產生，或按「修改」自行輸入）*' if v else '*（請先開始看診）*')
             w.at_label.set_text('0/0')
@@ -527,7 +672,11 @@ class MainPage:
         w.at_md.set_content(app.display(version.final_at) or '（空白）')
 
     def render_advice(self):
-        w, v, app = self.w, self.visit, self.app
+        for w in self.advice_views():
+            self.render_advice_into(w)
+
+    def render_advice_into(self, w):
+        v, app = self.visit, self.app
         if v is None or not v.advice:
             for md in w.advice_md.values():
                 md.set_content('*（按「問診建議」產生）*' if v else '')
@@ -633,8 +782,39 @@ class MainPage:
         w.job.classes(replace='job failed' if failed else 'job')
         w.job.tooltip(job.message if job.status != 'running' else '')
 
+    def update_note_controls(self, w, *, live: bool, host: bool, c):
+        """`live`: the buttons of this panel work; `host`: this is the panel that holds the editor."""
+        note_editing = self.note_mode == 'edit'
+        here = note_editing and host
+        w.btn_browse.set_enabled(live and c.visiting and not note_editing)
+        w.btn_diff.set_enabled(live and c.visiting and not note_editing)
+        w.btn_edit.set_enabled(live and c.can_act and not c.busy and not c.editing)
+        w.btn_edit.set_visibility(not here)
+        w.btn_edit_done.set_visibility(here)
+        w.btn_edit_cancel.set_visibility(here)
+        w.btn_undo.set_enabled(live and c.can_act and not c.busy and not c.editing and c.v.note.can_undo())
+        w.btn_redo.set_enabled(live and c.can_act and not c.busy and not c.editing and c.v.note.can_redo())
+        w.btn_copy_note.set_enabled(live and c.visiting)
+
+    def update_analysis_controls(self, w, *, live: bool, host: bool, c):
+        here = self.analysis_editing and host
+        w.btn_at_prev.set_enabled(live and c.visiting and not self.analysis_editing and c.index > 0)
+        w.btn_at_next.set_enabled(live and c.visiting and not self.analysis_editing and 0 <= c.index < c.count - 1)
+        w.btn_at_edit.set_enabled(live and c.can_act and not c.busy and not c.editing)
+        w.btn_at_edit.set_visibility(not here)
+        w.btn_at_save.set_visibility(here)
+        w.btn_at_cancel.set_visibility(here)
+        w.btn_process.set_enabled(live and c.visiting and c.count > 0 and not self.analysis_editing)
+        w.btn_copy_at.set_enabled(live and c.visiting and c.count > 0)
+
+    def update_advice_controls(self, w, *, live: bool, c):
+        w.btn_ad_prev.set_enabled(live and c.visiting and c.a_index > 0)
+        w.btn_ad_next.set_enabled(live and c.visiting and 0 <= c.a_index < c.a_count - 1)
+
     def update_controls(self):
         app, v, w = self.app, self.visit, self.w
+        if self.zoom is not None and app.phase != 'visiting':          # the visit is over: nothing left to read larger
+            self.drop_zoom()
         finishing = bool(v and v.phase == 'finishing') or app._busy_transition
         visiting = app.phase == 'visiting'
         busy = self.busy()
@@ -674,33 +854,26 @@ class MainPage:
         w.btn_traditional.set_enabled(not editing)
         w.btn_simplified.set_text('✓ 轉簡體' if app.script_mode == 'simplified' else '轉簡體')
         w.btn_traditional.set_text('✓ 轉繁體' if app.script_mode == 'traditional' else '轉繁體')
-        # note panel
-        note_editing = self.note_mode == 'edit'
-        w.btn_browse.set_enabled(visiting and not note_editing)
-        w.btn_diff.set_enabled(visiting and not note_editing)
-        w.btn_edit.set_enabled(can_act and not busy and not editing)
-        w.btn_edit.set_visibility(not note_editing)
-        w.btn_edit_done.set_visibility(note_editing)
-        w.btn_edit_cancel.set_visibility(note_editing)
-        w.btn_undo.set_enabled(can_act and not busy and not editing and v.note.can_undo())
-        w.btn_redo.set_enabled(can_act and not busy and not editing and v.note.can_redo())
-        w.btn_copy_note.set_enabled(visiting)
-        # analysis panel
-        count = len(v.analysis) if v else 0
-        index = v.analysis_index if v else -1
-        w.btn_at_prev.set_enabled(visiting and not self.analysis_editing and index > 0)
-        w.btn_at_next.set_enabled(visiting and not self.analysis_editing and 0 <= index < count - 1)
-        w.btn_at_edit.set_enabled(can_act and not busy and not editing)
-        w.btn_at_edit.set_visibility(not self.analysis_editing)
-        w.btn_at_save.set_visibility(self.analysis_editing)
-        w.btn_at_cancel.set_visibility(self.analysis_editing)
-        w.btn_process.set_enabled(visiting and count > 0 and not self.analysis_editing)
-        w.btn_copy_at.set_enabled(visiting and count > 0)
-        # advice panel
-        a_count = len(v.advice) if v else 0
-        a_index = v.advice_index if v else -1
-        w.btn_ad_prev.set_enabled(visiting and a_index > 0)
-        w.btn_ad_next.set_enabled(visiting and 0 <= a_index < a_count - 1)
+        # The three panels: the small ones and, while open, the enlarged one. With an enlarged panel open only that one
+        # works; the buttons of the small ones are paused (their scroll bars still work). The enlarged panel is put back
+        # with its 縮小 button, which waits while that panel is being edited.
+        c = SimpleNamespace(v=v, visiting=visiting, can_act=can_act, busy=busy, editing=editing,
+                            count=len(v.analysis) if v else 0, index=v.analysis_index if v else -1,
+                            a_count=len(v.advice) if v else 0, a_index=v.advice_index if v else -1)
+        small = self.zoom is None
+        self.update_note_controls(w, live=small, host=self.zoom != 'note', c=c)
+        self.update_analysis_controls(w, live=small, host=self.zoom != 'analysis', c=c)
+        self.update_advice_controls(w, live=small, c=c)
+        for kind in ('note', 'analysis', 'advice'):
+            getattr(w, f'btn_zoom_{kind}').set_enabled(small and visiting and not editing)
+        if self.zoom == 'note':
+            self.update_note_controls(self.z['note'], live=True, host=True, c=c)
+        elif self.zoom == 'analysis':
+            self.update_analysis_controls(self.z['analysis'], live=True, host=True, c=c)
+        elif self.zoom == 'advice':
+            self.update_advice_controls(self.z['advice'], live=True, c=c)
+        if self.zoom is not None:
+            self.z[self.zoom].btn_zoom.set_enabled(not self.zoom_locked())
         # transcript level meter
         w.level.set_value(v.source.level if v and v.source is not None and v.phase == 'recording' else 0)
         w.tx_info.set_text(f'{len(v.pipeline.segments)} 段' if v and v.pipeline else '')
