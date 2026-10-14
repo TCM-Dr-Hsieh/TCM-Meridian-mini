@@ -23,6 +23,8 @@ from .style import CSS, JS
 
 REMOTE_JS = Path(__file__).with_name('remote_capture.js')     # served by app.py at REMOTE_JS_URL
 REMOTE_JS_URL = '/mini-remote-capture.js'
+REPLAY_JS = Path(__file__).with_name('replay.js')             # served by app.py at REPLAY_JS_URL
+REPLAY_JS_URL = '/mini-replay.js'
 EMPTY = '<span class="empty">（空白）</span>'
 BACKLOG_WARNING_WINDOWS = 10        # ~30 s of audio waiting for ASR / correction (one window per 3 s stride)
 WAIT_FOR_BROWSER_SECONDS = 15       # a remote-microphone visit whose browser has not connected after this long is flagged
@@ -60,6 +62,7 @@ class MainPage:
         self.note_mode = 'browse'            # browse | diff | edit
         self.analysis_editing = False
         self.patient_open = False            # the floating 患者資訊 panel; a reloaded page starts with it closed
+        self._transcript_visit: str | None = None     # replay token of the visit whose transcript is on screen (None: none)
         self.zoom: str | None = None         # the enlarged panel on screen: note | analysis | advice (one at a time); a reloaded page starts without
         self._sigs: dict[str, object] = {}
         self.w = SimpleNamespace()
@@ -72,6 +75,7 @@ class MainPage:
         ui.add_css(CSS)
         ui.add_head_html(f'<script>{JS}</script>')
         ui.add_head_html(f'<script src="{REMOTE_JS_URL}?v=1"></script>')
+        ui.add_head_html(f'<script src="{REPLAY_JS_URL}?v=1"></script>')
         ui.on('mini_remote', self.on_remote_event)
         ui.on('mini_zoom_escape', lambda _=None: self.close_zoom())
         ui.colors(primary='#2d6a4f', secondary='#52665d', accent='#c58d23', positive='#2e7d64')
@@ -709,18 +713,32 @@ class MainPage:
         w, v, app = self.w, self.visit, self.app
         if v is None or v.pipeline is None:
             w.tx_html.set_content(_placeholder('按「開始看診」後，語音辨識文字會顯示在這裡。'))
+            if self._transcript_visit is not None:
+                self._transcript_visit = None
+                ui.run_javascript('window.miniReplay && window.miniReplay.close()')     # the replay window only exists for a visit
             return
+        if self._transcript_visit is not None and self._transcript_visit != v.replay_token:
+            # One visit replaced by another between two renders (a throttled background tab never sees the empty state
+            # in between): the player still holds the previous patient's clip.
+            ui.run_javascript('window.miniReplay && window.miniReplay.close()')
+        self._transcript_visit = v.replay_token
         pipeline = v.pipeline
         unlocked = set(pipeline.unlocked_indexes())
         speaker = v.speaker if v.speaker is not None and v.speaker.marks_visible else None
         rows = []
+        token = html.escape(v.replay_token)
         for seg in pipeline.segments:
             if not seg.visible:
                 continue
             cls = 'seg gap' if seg.kind == 'gap' else ('seg unlocked' if seg.index in unlocked else 'seg')
             runs = speaker.runs(seg) if speaker is not None and seg.kind == 'speech' else None
             body = ' '.join(self.run_html(run) for run in runs) if runs else html.escape(app.display(seg.corrected))
-            rows.append(f'<div class="{cls}"><span class="seg-no">#{seg.index} {format_clock(seg.new_start)}</span>{body}</div>')
+            # `#n mm:ss` is the click target of the replay window (mini/ui/replay.js); data-start is the exact start second,
+            # data-token the visit the row belongs to (the clip request carries it, see mini/voice/replay.py).
+            start = f'{seg.new_start:.2f}'
+            rows.append(f'<div class="{cls}" data-idx="{seg.index}" data-start="{start}">'
+                        f'<span class="seg-no" data-idx="{seg.index}" data-start="{start}" data-token="{token}" '
+                        f'title="點擊回聽這一段（從這裡起 30 秒）">#{seg.index} {format_clock(seg.new_start)}</span>{body}</div>')
         w.tx_html.set_content(''.join(rows) if rows else _placeholder('（等待語音…）'))
         ui.run_javascript(f"window.miniScrollToEnd('c{w.tx_scroll.id}')")
 

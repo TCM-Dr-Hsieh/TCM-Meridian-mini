@@ -29,6 +29,9 @@ body {background:#eef2f0; color:#1f2d27; font-family:"Segoe UI","Microsoft Jheng
 .empty {color:#9aa8a1;}
 .seg {margin:2px 0; padding:2px 6px; border-radius:6px;}
 .seg-no {color:#7a8a83; font-size:11px; margin-right:6px; font-family:Consolas,monospace;}
+.seg-no[data-start] {cursor:pointer; border-radius:4px; padding:0 2px; margin-left:-2px;}
+.seg-no[data-start]:hover {color:#1b4332; background:#dcebe3; text-decoration:underline;}
+.seg.replaying {background:#dcebe3; box-shadow:inset 3px 0 0 #2d6a4f;}
 .who {font-weight:700; margin-right:2px;}
 .who.doctor {color:#1b4332;} .who.other {color:#9a5a00;} .who.unknown {color:#7f8b86; font-weight:600;}
 .who.background {color:#929e99; font-weight:600;} .bg-text {color:#929e99;}
@@ -68,6 +71,25 @@ body {background:#eef2f0; color:#1f2d27; font-family:"Segoe UI","Microsoft Jheng
 .float-body {flex:1 1 0; min-height:0; overflow:auto; padding:10px 14px;}
 .patient-text {white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.75; font-size:14px; user-select:text; cursor:text;}
 .patient-text.empty {color:#9aa8a1;}
+/* The replay window (mini/ui/replay.js) is a float-panel built in the browser. */
+.replay-panel {resize:both;}
+.replay-body {flex:1 1 0; min-height:0; overflow:auto; padding:10px 14px; display:flex; flex-direction:column; gap:8px; font-size:14px;}
+.replay-now {font-family:Consolas,monospace; font-size:12px; color:#52665d; min-height:16px;}
+.replay-text {flex:1 1 0; min-height:36px; overflow:auto; line-height:1.7; overflow-wrap:anywhere; user-select:text;
+              background:#f5f8f6; border:1px solid #e0e8e3; border-radius:8px; padding:6px 10px;}
+.replay-controls {display:flex; align-items:center; gap:8px;}
+.replay-bar {flex:1 1 auto; min-width:60px; accent-color:#2d6a4f; cursor:pointer;}
+.replay-time {font-family:Consolas,monospace; font-size:12px; color:#52665d; white-space:nowrap;}
+.replay-btn {display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border:0;
+             border-radius:50%; background:transparent; color:#1b4332; cursor:pointer;}
+.replay-btn:hover {background:#dcebe3;}
+.replay-btn .material-icons {font-size:22px;}
+.replay-start {display:flex; align-items:center; gap:6px; font-size:13px; color:#52665d;}
+.replay-start-input {width:84px; padding:2px 6px; border:1px solid #b9c9c1; border-radius:6px; font-family:Consolas,monospace;}
+.replay-go {padding:3px 10px; border:1px solid #2d6a4f; border-radius:6px; background:#fff; color:#2d6a4f; cursor:pointer; font-size:13px;}
+.replay-go:hover {background:#2d6a4f; color:#fff;}
+.replay-msg {color:#b3261e; font-size:13px; display:none;}
+.replay-note {color:#7a8a83; font-size:12px;}
 /* An enlarged panel (今日病歷, 問診建議: left + middle column; 分析與處置: middle + right column) is a grid item laid over the
    columns it covers, so it follows the window; it sits under the floating panels (z-index 3000) and the dialogs. */
 @media (min-width: 861px) {
@@ -160,8 +182,9 @@ window.miniFloat = (function () {
            width: parseFloat(el.style.width) || DEFAULT_W, height: parseFloat(el.style.height) || 400};
     }
     if (!(s && s.width > 0)) {
-      s = {width: DEFAULT_W, height: Math.min(window.innerHeight * 0.62, 560),
-           left: window.innerWidth - DEFAULT_W - 24, top: 96};
+      s = {width: parseFloat(el.dataset.defaultW) || DEFAULT_W,
+           height: parseFloat(el.dataset.defaultH) || Math.min(window.innerHeight * 0.62, 560),
+           left: window.innerWidth - (parseFloat(el.dataset.defaultW) || DEFAULT_W) - 24, top: 96};
     }
     // sized to the window, then pulled fully into view where it fits (the saved place may come from a bigger window)
     const w = Math.min(s.width, window.innerWidth - 20), h = Math.min(s.height, window.innerHeight - 20);

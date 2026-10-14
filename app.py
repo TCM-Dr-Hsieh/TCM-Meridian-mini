@@ -13,14 +13,20 @@ from nicegui import ui
 
 from mini.config import server_binding
 from mini.state import AppState
-from mini.ui.page import REMOTE_JS, REMOTE_JS_URL, MainPage
+from mini.ui.page import REMOTE_JS, REMOTE_JS_URL, REPLAY_JS, REPLAY_JS_URL, MainPage
 from mini.voice.remote import register_routes
+from mini.voice.replay import register_replay_routes
 
 state = AppState()
 
 # Remote microphone: the browser-side capture script and the WebSocket the audio arrives on (same origin as the page).
 ng_app.add_static_file(local_file=REMOTE_JS, url_path=REMOTE_JS_URL, max_cache_age=0)
 register_routes(ng_app)
+
+# Replay: click #n in the transcript to hear that part again. The player script and the route that cuts the clip out of
+# the recording in progress (same origin as the page; only the current visit's audio, by time).
+ng_app.add_static_file(local_file=REPLAY_JS, url_path=REPLAY_JS_URL, max_cache_age=0)
+register_replay_routes(ng_app, state)
 
 
 @ui.page('/', reconnect_timeout=60)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import time
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
@@ -94,6 +95,9 @@ class VisitSession:
                  llm_backoff: float = 1.0, today: date | None = None, speaker_embedder: Callable | None = None):
         self.store = store
         self.visit_id = store.visit_id
+        # Random and per visit: the transcript rows of this visit carry it, and the replay route (mini/voice/replay.py)
+        # serves audio only against it, so a page left over from another visit can never fetch this visit's recording.
+        self.replay_token = secrets.token_urlsafe(16)
         # The visit's date, fixed when the visit starts (not per job, so it cannot change across midnight); every
         # prompt that carries the 今日病歷 is given it.
         self.visit_date: date = today or datetime.now().date()
