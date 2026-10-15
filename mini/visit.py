@@ -17,7 +17,7 @@ from .jobs import BusyError, JobManager
 from .llm import LLMCaller, LLMClient, LLMScheduler
 from .record.diff import build_diff_md
 from .record.snapshots import SnapshotHistory
-from .record.tags import tag_human_edits
+from .record.tags import EditMerge, NoteEditError, merge_human_edit
 from .speaker.embedder import load_embedder
 from .speaker.service import SpeakerService
 from .visit_store import EventLog, VisitStore
@@ -407,15 +407,37 @@ class VisitSession:
         self.persist_note()
         self.on_change()
 
-    def edit_note_manual(self, new_text: str) -> bool:
-        """Apply a physician edit; returns False when nothing changed."""
+    def note_version_id(self) -> str:
+        """Id of the note version on screen (a random id, unique across visits); '' when there is none."""
+        current = self.note.get_current()
+        return current['id'] if current else ''
+
+    def _check_edit_base(self, base_id: str | None):
+        """An edit began on the version `base_id`; if the note has moved on since (another browser tab, a job, an undo, another
+        visit), saving would put the old text over the newer version. Refuse. None: the caller does not pin a version."""
+        if base_id is not None and base_id != self.note_version_id():
+            raise NoteEditError('病歷在你修改的期間已被更新（另一個視窗、作業或復原），為避免蓋掉較新的版本，這次修改不能儲存。'
+                                '請按「放棄」，再重新進入修改。')
+
+    def preview_note_edit(self, edited: str, base_id: str | None = None) -> EditMerge:
+        """What `edit_note_manual(edited)` would save, without saving (the edit box's live preview of removed tags)."""
+        self._check_edit_base(base_id)
+        return merge_human_edit(self.note.current_note(), edited, self.settings.note_edit.min_surviving_run)
+
+    def edit_note_manual(self, new_text: str, base_id: str | None = None) -> bool:
+        """Apply a physician edit; returns False when nothing changed. `new_text` is the edit box's text: the note without
+        its source tags (`editable_text`); the tags are put back, or dropped with the words they covered, by
+        `merge_human_edit`. `base_id`: the version the edit began on (`note_version_id()` at that time); a newer version
+        makes this raise `NoteEditError` instead of being overwritten. Tag syntax in `new_text` is refused the same way."""
         self._require_idle()
+        self._check_edit_base(base_id)
         current = self.note.current_note()
-        tagged = tag_human_edits(current, new_text)
-        if tagged == current:
+        merge = merge_human_edit(current, new_text, self.settings.note_edit.min_surviving_run)
+        if merge.text == current:
             return False
-        self.push_note(tagged, '醫師手動')
-        self.log.emit('note_manual_edit', index=self.note.current_index + 1)
+        removed = [{'tag': r.tag, 'text': r.text} for r in merge.removed]
+        self.push_note(merge.text, '醫師手動', meta={'removed_tags': removed} if removed else None)
+        self.log.emit('note_manual_edit', index=self.note.current_index + 1, removed_tags=removed)
         return True
 
     def undo_note(self) -> bool:

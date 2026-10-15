@@ -209,7 +209,9 @@ def summarize_event(event: dict) -> tuple[str, str | None]:
     if kind in ('note_undo', 'note_redo'):
         return f'病歷 {"回到" if kind == "note_undo" else "前進到"}版本 {event.get("index_after")}', None
     if kind == 'note_manual_edit':
-        return f'醫師手動修改病歷 → 版本 {event.get("index")}', None
+        removed = event.get('removed_tags') or []
+        gone = '；移除來源標籤：' + '、'.join(r.get('tag', '?') for r in removed) if removed else ''
+        return f'醫師手動修改病歷 → 版本 {event.get("index")}{gone}', None
     if kind == 'advice_created':
         return f'問診建議第 {event.get("index")} 則完成', None
     if kind == 'deid_created':

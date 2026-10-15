@@ -357,6 +357,29 @@ async def test_the_settings_dialog_keeps_the_two_vocabularies_separate(user: Use
     assert (saved['vocabulary'], saved['correction_vocabulary']) == ('舊的ASR詞', '新的校稿詞')
 
 
+async def test_the_settings_dialog_edits_the_tag_survival_threshold(user: User, tmp_path):
+    state = build_state(tmp_path, FakeLLM())
+    assert state.settings.note_edit.min_surviving_run == 3
+
+    @ui.page('/')
+    def index():
+        MainPage(state)
+
+    await user.open('/')
+    user.find('模型設定').click()
+    await user.should_see('修改病歷：標籤保留門檻', retries=40)
+    box = next(e for e in user.find(kind=ui.number).elements if str(e.props.get('label', '')).startswith('修改病歷：標籤保留門檻'))
+    assert box.value == 3
+    box.set_value(0)                                                       # below the minimum: refused, nothing saved
+    user.find('儲存設定').click()
+    await user.should_see('不可小於', retries=40)
+    assert state.settings.note_edit.min_surviving_run == 3
+    box.set_value(5)
+    user.find('儲存設定').click()
+    await until(lambda: state.settings.note_edit.min_surviving_run == 5)
+    assert json.loads(state.config_path.read_text(encoding='utf-8'))['note_edit'] == {'min_surviving_run': 5}
+
+
 async def test_agent_buttons_are_unavailable_until_a_visit_starts(user: User, tmp_path):
     state = build_state(tmp_path, FakeLLM())
 

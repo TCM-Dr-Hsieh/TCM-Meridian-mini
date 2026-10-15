@@ -110,6 +110,9 @@ def build_diff_md(snapshots: list[dict], current_index: int) -> str:
                 lines.append(f'- 審查：{review.get("rounds", "?")} 輪、通過 {review.get("passes", "?")} 次')
         if meta.get('call_ids'):
             lines.append(f'- LLM 呼叫：{", ".join(meta["call_ids"])}')
+        for item in meta.get('removed_tags') or []:
+            if isinstance(item, dict):
+                lines.append(f'- 移除來源標籤：{item.get("tag", "?")}（原涵蓋：{item.get("text", "")}）')
         lines.append('')
         if index == 0:
             lines += ['```text', snap.get('note', ''), '```', '']

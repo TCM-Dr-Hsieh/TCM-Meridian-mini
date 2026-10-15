@@ -8,6 +8,7 @@ from mini.agents.common import date_section, format_visit_date
 from mini.agents.record_job import parse_review
 from mini.jobs import BusyError
 from mini.llm import ValidationError
+from mini.record.tags import editable_text
 
 PASS = {'thinking': '1. 遺漏檢查：無。2. A～G 檢查：無。',
         'agree': 'yes', 'comment': '無須修改，可直接更新病歷'}
@@ -233,7 +234,7 @@ async def test_incremental_write_edits_lines_in_place(make_session):
 async def test_undo_then_ai_write_truncates_redo_and_audits_it(make_session):
     h = await make_session()
     await h.run_job('record')
-    h.session.edit_note_manual('甲- 現病史：頭痛三天[語音#1]\n乙- 醫師加的')
+    h.session.edit_note_manual('甲- 現病史：頭痛三天\n乙- 醫師加的')
     assert h.session.note.current_index == 2
     h.session.undo_note()
     h.session.undo_note()
@@ -249,10 +250,10 @@ async def test_undo_then_ai_write_truncates_redo_and_audits_it(make_session):
 async def test_manual_edit_is_tagged_and_blocked_while_a_job_runs(make_session):
     h = await make_session()
     await h.run_job('record')
-    assert h.session.edit_note_manual(h.session.note.current_note() + '\n丙- 個人史：不抽菸') is True
+    assert h.session.edit_note_manual(editable_text(h.session.note.current_note()) + '\n丙- 個人史：不抽菸') is True
     lines = h.session.note.current_note().split('\n')
     assert lines[-1].endswith('[醫師手動]') and not lines[0].endswith('[醫師手動]')
-    assert h.session.edit_note_manual(h.session.note.current_note()) is False
+    assert h.session.edit_note_manual(editable_text(h.session.note.current_note())) is False
     h.fake.delay = 0.3
     job = h.session.start_job('record')
     await asyncio.sleep(0.05)
@@ -442,7 +443,7 @@ async def test_writer_and_reviewer_both_receive_the_note_modification_history(ma
     """Like the original project: both agents get 【病歷修改 diff 過程】 (initial version -> current version)."""
     h = await make_session()
     await h.run_job('record')                                                   # version 2: 病歷書寫 #1
-    assert h.session.edit_note_manual('甲- 現病史：患者頭痛三天[語音#1]\n辛.9- 大便：一日三次')     # version 3: physician
+    assert h.session.edit_note_manual('甲- 現病史：患者頭痛三天\n辛.9- 大便：一日三次')     # version 3: physician
     h.fake.calls.clear()
     job = await h.run_job('record')
     assert job.status == 'succeeded', job.message

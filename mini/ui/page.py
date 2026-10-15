@@ -14,7 +14,7 @@ from nicegui import ui
 
 from ..jobs import BusyError
 from ..record.diff import diff_html, simple_md_render
-from ..record.tags import strip_citations
+from ..record.tags import MANUAL_TAG, NoteEditError, editable_text, strip_citations, tokenize
 from ..speaker import BACKGROUND, LABEL_NAMES, TEXT_SOURCES, UNKNOWN
 from ..state import AppState, StateError
 from ..textutil import format_clock
@@ -32,6 +32,24 @@ WAIT_FOR_BROWSER_SECONDS = 15       # a remote-microphone visit whose browser ha
 
 def _placeholder(text: str) -> str:
     return f'<span class="empty">{html.escape(text)}</span>'
+
+
+def reference_html(note: str) -> str:
+    """The note as the read-only reference window shows it: text as written, every source tag in light colour."""
+    if not note.strip():
+        return EMPTY
+    parts = []
+    for piece, is_tag in tokenize(note):
+        if is_tag:
+            parts.append(f'<span class="src-tag{" manual" if piece == MANUAL_TAG else ""}">{html.escape(piece)}</span>')
+        else:
+            parts.append(html.escape(piece))
+    return ''.join(parts)
+
+
+def _clip(text: str, limit: int = 18) -> str:
+    """The last `limit` characters of the words a tag covered (where the sentence ends is what the physician recognises)."""
+    return text if len(text) <= limit else '…' + text[-limit:]
 
 
 def only_for(kind: str):
@@ -62,6 +80,12 @@ class MainPage:
         self.note_mode = 'browse'            # browse | diff | edit
         self.analysis_editing = False
         self.patient_open = False            # the floating 患者資訊 panel; a reloaded page starts with it closed
+        self.reference_open = False          # the floating 參考版本 window shown while the note is edited (read-only, with the tags)
+        self.reference_dismissed = False     # the physician closed it during this edit: it does not open again until the next edit
+        self.reference_note = ''             # the version being edited, as it was when the edit began
+        self.reference_label = ''
+        self.edit_base_id = ''               # id of the note version this edit began on; a save over a newer version is refused
+        self._preview_dirty = False          # the edit box changed since the removed-tags preview was last computed
         self._transcript_visit: str | None = None     # replay token of the visit whose transcript is on screen (None: none)
         self.zoom: str | None = None         # the enlarged panel on screen: note | analysis | advice (one at a time); a reloaded page starts without
         self._sigs: dict[str, object] = {}
@@ -137,6 +161,7 @@ class MainPage:
                 self.build_analysis_panel(zoom=True)
                 self.build_advice_panel(zoom=True)
         self.build_patient_panel()
+        self.build_reference_panel()
         self.render_all()
         self.update_status()
         self.update_controls()
@@ -175,8 +200,13 @@ class MainPage:
                 self.zoom_button(w, 'note', zoom)
             with ui.element('div').classes('panel-body') as w.note_body:
                 w.note_html = ui.html('', sanitize=False)
-            w.note_editor = ui.textarea().props('outlined').classes('editor w-full')
+            # The edit box shows the note without its source tags (they cannot be damaged, nor get in the way); the
+            # read-only 參考版本 window shows them, and merge_human_edit puts them back on save. The preview line under the
+            # box says which tags the save would take away. It is recomputed from tick, not on every keystroke.
+            w.note_editor = ui.textarea(on_change=self.mark_preview_dirty).props('outlined').classes('editor w-full')
             w.note_editor.set_visibility(False)
+            w.note_preview = ui.label('').classes('edit-preview')
+            w.note_preview.set_visibility(False)
         if zoom:
             self.hidden_root(w, root)
 
@@ -261,6 +291,22 @@ class MainPage:
                 w.patient_text = ui.label('').classes('patient-text')
         w.patient_panel.set_visibility(False)
 
+    def build_reference_panel(self):
+        """The read-only 參考版本 window of the note edit: the version being edited, with its source tags in light colour, so
+        the physician sees which part came from which source while editing the tag-less box. A floating window like
+        the patient panel (no backdrop; draggable and resizable in the browser)."""
+        w = self.w
+        with ui.element('div').classes('float-panel') as w.ref_panel:
+            with ui.element('div').classes('float-head').tooltip('拖曳標題列移動；連按兩下回到預設位置；右下角可調整大小'):
+                w.ref_title = ui.label('參考版本').classes('float-title')
+                ui.element('div').classes('spacer').style('flex:1 1 auto')
+                ui.button(icon='close', on_click=self.close_reference).props('dense flat round') \
+                    .tooltip('關閉（這次修改不再自動開啟）').mark('reference-close')
+            with ui.element('div').classes('float-body'):
+                ui.label('唯讀；淡色的是來源標籤。修改框裡看不到標籤，儲存時由程式保留或移除。').classes('hint')
+                w.ref_html = ui.html('', sanitize=False).classes('reference-text')
+        w.ref_panel.set_visibility(False)
+
     # ------------------------------------------------------------------ helpers
     @property
     def visit(self):
@@ -275,7 +321,7 @@ class MainPage:
     def safe(self, fn, *args):
         try:
             return fn(*args)
-        except (BusyError, StateError) as exc:
+        except (BusyError, StateError, NoteEditError) as exc:
             ui.notify(str(exc), type='warning')
         return None
 
@@ -493,22 +539,83 @@ class MainPage:
         if self.app.script_mode != 'original':
             self.app.set_script_mode('original')
             ui.notify('已還原為原文字形再進入修改。')
-        self.note_host().note_editor.set_value(self.visit.note.current_note())
+        note = self.visit.note
+        self.reference_note = note.current_note()
+        self.edit_base_id = self.visit.note_version_id()
+        self.reference_label = f'參考：版本 {note.current_index + 1}（修改前）'
+        self.reference_dismissed = False
+        self.note_host().note_editor.set_value(editable_text(self.reference_note))
         self.note_mode = 'edit'
         self.render_all()
         self.update_controls()
+        self.update_edit_preview()
+        self.sync_reference()
 
     @only_for('note')
     def leave_note_edit(self, save: bool):
         if save and self.visit:
-            changed = self.safe(self.visit.edit_note_manual, self.note_host().note_editor.value or '')
+            edited = self.note_host().note_editor.value or ''
+            try:
+                removed = self.visit.preview_note_edit(edited, self.edit_base_id).removed
+            except NoteEditError as exc:                  # a tag typed into the box, or the note changed under this edit
+                ui.notify(str(exc), type='warning', multi_line=True)
+                return
+            changed = self.safe(self.visit.edit_note_manual, edited, self.edit_base_id)
             if changed is None:
                 return
-            ui.notify('修改已保存（新增行已標記 [醫師手動]）。' if changed else '未偵測到變更。',
-                      type='positive' if changed else 'info')
+            ui.notify('修改已保存（新增行已標記 [醫師手動]' + (f'；已移除 {len(removed)} 個來源標籤' if removed else '') + '）。'
+                      if changed else '未偵測到變更。', type='positive' if changed else 'info')
         self.note_mode = 'browse'
         self.render_all()
         self.update_controls()
+        self.sync_reference()
+
+    # -- note edit: the read-only reference window and the removed-tags preview ------------------
+    def mark_preview_dirty(self, _event=None):
+        self._preview_dirty = True
+
+    def update_edit_preview(self):
+        """Under the edit box: which source tags the save would take away (those whose words are all gone)."""
+        self._preview_dirty = False
+        if self.note_mode != 'edit' or self.visit is None:
+            return
+        host = self.note_host()
+        try:
+            removed = self.visit.preview_note_edit(host.note_editor.value or '', self.edit_base_id).removed
+        except NoteEditError as exc:
+            host.note_preview.set_text(str(exc))
+            host.note_preview.classes(replace='edit-preview warn')
+            return
+        if not removed:
+            host.note_preview.set_text('儲存後不會移除任何來源標籤。（來源標籤已隱藏，可對照右側的參考版本。）')
+        else:
+            shown = [f'{r.tag}（{_clip(r.text)}）' if r.text else r.tag for r in removed[:5]]
+            more = f' 等共 {len(removed)} 個' if len(removed) > 5 else ''
+            host.note_preview.set_text('儲存後將移除來源標籤（它們涵蓋的字都已不在）：' + '、'.join(shown) + more)
+        host.note_preview.classes(replace='edit-preview' + (' warn' if removed else ''))
+
+    def sync_reference(self):
+        """Open the reference window when an edit begins, put it away when the edit is over (whichever way it ends: 完成,
+        放棄, the visit ending). Closed by the physician: it stays closed for the rest of that edit."""
+        if self.note_mode != 'edit' or self.app.phase != 'visiting':
+            self.reference_dismissed = False
+            if self.reference_open:
+                self.set_reference_open(False)
+        elif not self.reference_open and not self.reference_dismissed:
+            self.set_reference_open(True)
+
+    def set_reference_open(self, opened: bool):
+        w = self.w
+        self.reference_open = opened
+        w.ref_panel.set_visibility(opened)
+        if opened:
+            w.ref_title.set_text(self.reference_label or '參考版本')
+            w.ref_html.set_content(reference_html(self.reference_note))
+            ui.run_javascript(f"window.miniFloat.show('c{w.ref_panel.id}')")
+
+    def close_reference(self):
+        self.reference_dismissed = True
+        self.set_reference_open(False)
 
     @only_for('note')
     def undo_note(self):
@@ -638,6 +745,7 @@ class MainPage:
         editing = mode == 'edit'
         w.note_body.set_visibility(not editing)
         w.note_editor.set_visibility(editing)
+        w.note_preview.set_visibility(editing)
         if v is None:
             w.note_html.set_content(_placeholder('請先匯入患者並開始看診'))
             w.note_version.set_text('')
@@ -751,6 +859,9 @@ class MainPage:
         self.update_status()
         self.update_controls()
         self.render_panels()
+        self.sync_reference()
+        if self._preview_dirty:
+            self.update_edit_preview()
 
     def update_status(self):
         app, v, w = self.app, self.visit, self.w

@@ -2,6 +2,7 @@ import json
 import wave
 from datetime import datetime
 
+from mini.record.tags import editable_text
 from mini.visit_store import EventLog, VisitStore, render_log_md
 
 
@@ -119,7 +120,7 @@ async def test_finishing_a_visit_writes_every_audit_file(make_session):
     h = await make_session(seconds=7)
     s = h.session
     await h.run_job('record')
-    s.edit_note_manual(s.note.current_note() + '\n乙- 過去病史：高血壓')
+    s.edit_note_manual(editable_text(s.note.current_note()) + '\n乙- 過去病史：高血壓')
     await h.run_job('advice')
     await h.run_job('analysis')
     s.edit_analysis_manual('醫師修改後的 A&T')

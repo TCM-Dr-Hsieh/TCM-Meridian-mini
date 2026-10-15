@@ -517,6 +517,11 @@ def open_settings_dialog(app: AppState):
             # ---- general ---------------------------------------------------------
             with ui.tab_panel(t_general).classes('gap-3 p-0'):
                 visits_dir = ui.input('看診資料夾（相對路徑以專案目錄為基準）', value=draft.visits_dir).classes('w-full')
+                min_run_field = ui.number('修改病歷：標籤保留門檻（連續字數）', value=draft.note_edit.min_surviving_run,
+                                          min=1, max=20, step=1).classes('w-72')
+                ui.label('手動修改今日病歷時，某個來源標籤涵蓋的字如果已全部被改掉或刪掉，標籤會被移除。這個數字是「原文至少連續留下幾個字」才算還在：'
+                         '數字越大，標籤越容易被移除；越小，標籤越容易保留（填 1：只要還留下任何一個字就保留）。預設 3。'
+                         '標籤涵蓋的字不足這個數字時，要求全部都在。從下一次開始看診生效。').classes('hint')
                 ui.label('設定保存於專案目錄的 config.json（含 API Key，已加入 .gitignore）。看診中此視窗鎖定。').classes('hint')
 
         error = ui.label('').classes('text-red-700 text-sm')
@@ -546,6 +551,7 @@ def open_settings_dialog(app: AppState):
                 for key in ('a', 'b'):
                     new.professors[key].role_style = prof_style[key].value or ''
                 new.visits_dir = visits_dir.value or ''
+                new.note_edit.min_surviving_run = min_run_field.value
                 app.update_settings(new)
             except (ValueError, TypeError, StateError, OSError) as exc:
                 error.set_text(str(exc))

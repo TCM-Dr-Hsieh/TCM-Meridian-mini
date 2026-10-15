@@ -93,6 +93,31 @@ def test_old_config_without_context_tokens_gets_the_default(tmp_path):
     assert Settings.load(path).agents['ai_advice'].context_tokens == DEFAULT_CONTEXT_TOKENS
 
 
+def test_the_tag_survival_threshold_defaults_to_three_roundtrips_and_validates(tmp_path):
+    from mini.record.tags import MIN_SURVIVING_RUN
+    s = Settings()
+    assert s.note_edit.min_surviving_run == MIN_SURVIVING_RUN == 3
+    s.note_edit.min_surviving_run = 5
+    path = tmp_path / 'config.json'
+    s.save(path)
+    assert Settings.load(path).note_edit.min_surviving_run == 5
+    for bad in (0, -1, 21, 2.5, 'x', True, None):
+        s.note_edit.min_surviving_run = bad
+        with pytest.raises(ValueError, match='標籤保留門檻'):
+            s.validate()
+    for good in (1, 20):
+        s.note_edit.min_surviving_run = good
+        s.validate()
+
+
+def test_an_old_config_without_the_note_edit_section_gets_the_default(tmp_path):
+    path = tmp_path / 'config.json'
+    path.write_text(json.dumps({'review': {'pass_required_n': 1}}), encoding='utf-8')
+    assert Settings.load(path).note_edit.min_surviving_run == 3
+    path.write_text(json.dumps({'note_edit': {'min_surviving_run': 4, 'unknown': 1}}), encoding='utf-8')
+    assert Settings.load(path).note_edit.min_surviving_run == 4
+
+
 def test_the_web_ui_listens_on_all_interfaces_by_default_and_can_be_restricted():
     from mini.config import DEFAULT_HOST, DEFAULT_PORT, server_binding
     assert (DEFAULT_HOST, DEFAULT_PORT) == ('0.0.0.0', 5050)

@@ -201,6 +201,18 @@ class ReviewSettings:
 
 
 @dataclass
+class NoteEditSettings:
+    """Editing today's note by hand (SPEC 5, 「修改模式的來源標籤」)."""
+    # A source tag is taken away when none of the words it covered survive the edit; a left-over run shorter than this many
+    # letters/digits is treated as chance. Higher = tags are removed more readily; lower = kept more readily (1: any single
+    # surviving letter keeps the tag). A span with fewer letters than this needs all of them.
+    min_surviving_run: int = 3
+
+    def validate(self):
+        self.min_surviving_run = _number(self.min_surviving_run, '標籤保留門檻（連續字數）', 1, 20, integer=True)
+
+
+@dataclass
 class ProfessorStyle:
     name: str = ''
     role_style: str = ''
@@ -223,6 +235,7 @@ class Settings:
     asr: ASRSettings = field(default_factory=ASRSettings)
     speaker: SpeakerSettings = field(default_factory=SpeakerSettings)
     review: ReviewSettings = field(default_factory=ReviewSettings)
+    note_edit: NoteEditSettings = field(default_factory=NoteEditSettings)
     agents: dict[str, Endpoint] = field(default_factory=default_agents)
     professors: dict[str, ProfessorStyle] = field(default_factory=default_professors)
     visits_dir: str = 'visits'
@@ -232,6 +245,7 @@ class Settings:
         self.asr.validate()
         self.speaker.validate()
         self.review.validate()
+        self.note_edit.validate()
         for key in AGENT_KEYS:
             self.agents[key].validate(AGENT_LABELS[key])
         for key in ('a', 'b', 'c'):
@@ -272,6 +286,7 @@ class Settings:
             settings.asr.correction_vocabulary = settings.asr.vocabulary
         settings.speaker = build(SpeakerSettings, data.get('speaker'))
         settings.review = build(ReviewSettings, data.get('review'))
+        settings.note_edit = build(NoteEditSettings, data.get('note_edit'))
         agents = default_agents()
         for key, raw in (data.get('agents') or {}).items():
             if key in agents and isinstance(raw, dict):

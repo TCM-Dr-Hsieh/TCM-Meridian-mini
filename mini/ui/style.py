@@ -71,6 +71,12 @@ body {background:#eef2f0; color:#1f2d27; font-family:"Segoe UI","Microsoft Jheng
 .float-body {flex:1 1 0; min-height:0; overflow:auto; padding:10px 14px;}
 .patient-text {white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.75; font-size:14px; user-select:text; cursor:text;}
 .patient-text.empty {color:#9aa8a1;}
+/* The edit box of the note shows no source tags; the reference window does, in light colour. The line under the box lists the tags the save would drop. */
+.edit-preview {flex:none; font-size:12px; line-height:1.5; color:#7a8a83; padding:4px 2px 0; overflow-wrap:anywhere;}
+.edit-preview.warn {color:#9a4b00;}
+.reference-text {white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.9; font-size:14px; user-select:text; cursor:text; margin-top:6px;}
+.src-tag {color:#8fa398; font-size:12px; background:#f0f5f2; border-radius:4px; padding:0 2px; margin:0 1px;}
+.src-tag.manual {color:#b08a3c; background:#fbf4e3;}
 /* The replay window (mini/ui/replay.js) is a float-panel built in the browser. */
 .replay-panel {resize:both;}
 .replay-body {flex:1 1 0; min-height:0; overflow:auto; padding:10px 14px; display:flex; flex-direction:column; gap:8px; font-size:14px;}

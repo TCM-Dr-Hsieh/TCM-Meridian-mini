@@ -8,6 +8,7 @@ import pytest
 from nicegui import ui
 from nicegui.testing import User
 
+from mini.record.tags import editable_text
 from mini.ui import dialogs, style
 from mini.ui.page import MainPage
 from tests.helpers import FakeLLM
@@ -171,7 +172,7 @@ async def test_the_note_is_edited_in_the_enlarged_panel_which_cannot_close_meanw
         page.enter_note_edit()
     z = page.z['note']
     assert page.note_mode == 'edit' and z.note_editor.visible and not z.note_body.visible
-    assert z.note_editor.value == visit.note.current_note()
+    assert z.note_editor.value == editable_text(visit.note.current_note())
     assert not page.w.note_editor.visible and page.w.note_body.visible                  # behind it: the note as it stands
     assert page.w.btn_edit.visible and not page.w.btn_edit_done.visible and not page.w.btn_edit_cancel.visible
     assert z.btn_edit_done.visible and z.btn_edit_cancel.visible and not z.btn_edit.visible
@@ -181,7 +182,7 @@ async def test_the_note_is_edited_in_the_enlarged_panel_which_cannot_close_meanw
         page.close_zoom()
         page.open_zoom('analysis')
     assert page.zoom == 'note'
-    z.note_editor.set_value(visit.note.current_note() + '\n丙- 備註：高血壓服藥中')
+    z.note_editor.set_value(editable_text(visit.note.current_note()) + '\n丙- 備註：高血壓服藥中')
     with user.client:
         page.leave_note_edit(True)
     assert len(visit.note.snapshots) == before + 1 and '高血壓服藥中' in visit.note.current_note()
