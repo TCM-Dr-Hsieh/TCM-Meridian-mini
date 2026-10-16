@@ -68,6 +68,38 @@ async def test_asr_failure_retries_once_then_marks_a_numbered_gap_and_continues(
     assert '缺漏' in pipeline.snapshot().text
 
 
+class CutWordASR(FakeASR):
+    """The aligner stretches the last word of every window past the end of the audio: it starts 0.12 s past it, ends `over` s past."""
+
+    def __init__(self, over, **kwargs):
+        super().__init__(**kwargs)
+        self.over = over
+
+    async def recognize(self, settings, samples):
+        result = await super().recognize(settings, samples)
+        duration = len(samples) / 16000
+        result['items'][-1].update(start=duration + 0.12, end=duration + self.over)
+        return result
+
+
+async def test_a_word_cut_off_by_the_end_of_the_window_does_not_turn_the_window_into_a_gap(tmp_path):
+    asr = CutWordASR(0.52, default='我頭痛三天了')
+    pipeline, source, events = make_pipeline(tmp_path, 12, asr)
+    await run(pipeline, source)
+    assert [s.kind for s in pipeline.segments] == ['speech'] * 3 and 'asr_error' not in [t for t, _ in events]
+    for segment in pipeline.segments:
+        assert segment.alignment[-1]['end'] == segment.end                              # held at the end of the window
+        assert all(u['start'] <= u['end'] for u in segment.alignment)
+    assert '頭痛' in pipeline.snapshot().text
+
+
+async def test_a_word_stretched_further_than_the_edge_allowance_still_makes_a_gap(tmp_path):
+    asr = CutWordASR(0.9, default='我頭痛三天了')
+    pipeline, source, events = make_pipeline(tmp_path, 9, asr)
+    await run(pipeline, source)
+    assert pipeline.segments[0].kind == 'gap' and [t for t, _ in events].count('asr_error') >= 2     # tried twice, then a gap
+
+
 async def test_silence_creates_no_segment_but_advances(tmp_path):
     asr = FakeASR(default='')
     pipeline, source, _ = make_pipeline(tmp_path, 6, asr)
