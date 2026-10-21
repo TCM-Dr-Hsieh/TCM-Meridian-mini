@@ -495,7 +495,8 @@ async def test_segments_still_being_proofread_are_explained_as_valid_sources_to_
 async def test_prompts_carry_the_rules_that_shorten_review_loops(make_session):
     """Found in the user's real visit and a replay of it: the reviewer listed only some of the lines that repeated
     one problem; a fact split across 3-second segments was tagged with one segment; a compound question answered
-    with one vague reply flip-flopped for three rounds. Each now has an explicit rule for the agent concerned."""
+    with one vague reply flip-flopped for three rounds. Each got an explicit rule for the agent concerned; the reviewer's
+    one (list every occurrence at once) was withdrawn on 2026-10-22, see the assertion below."""
     h = await make_session()
     await h.run_job('record')
     writer = h.fake.calls_for('writer')[0][0]['content']
@@ -507,8 +508,9 @@ async def test_prompts_carry_the_rules_that_shorten_review_loops(make_session):
     # positively: a prompt that shows the wrong spelling, even as a "don't", invites a local model to copy it)
     assert '每個編號前都要有 `#`，逗號後留一個空格' in writer and '`#` 只放在第一個編號前' in writer
     assert '[語音#47-#48]' not in writer
-    # reviewer: quote every occurrence in its free-text comment; a range that includes the question is correct
-    assert '逐一引用每一處有問題的原文' in reviewer and '不要只列一部分' in reviewer
+    # reviewer: NO "list every problem at once, every place" rule any more (2026-10-22: a replay of stored jobs took more
+    # review rounds and failed more often with it, and the notes were no better); a range that includes the question is correct
+    assert '一次列完' not in reviewer and '逐一引用每一處有問題的原文' not in reviewer and '不要只列一部分' not in reviewer
     assert '不得因為範圍包含提問段或相鄰段就判 G-2' in reviewer
     assert '`[語音#N, #M]`' in reviewer and '列舉 `[語音#47, #48]`' in reviewer       # the reviewer knows the same list spelling
     assert '[語音#N,M]' not in writer and '[語音#N,M]' not in reviewer and '[語音#47,48]' not in writer + reviewer
