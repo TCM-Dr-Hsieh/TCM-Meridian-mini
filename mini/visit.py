@@ -92,7 +92,8 @@ class VisitSession:
     def __init__(self, *, store: VisitStore, settings: Settings, patient_text: str, record_template: str,
                  analysis_template: str, client: LLMClient, scheduler: LLMScheduler, asr: LocalASR,
                  on_change: Callable[[], None] | None = None, source_factory: Callable | None = None,
-                 llm_backoff: float = 1.0, today: date | None = None, speaker_embedder: Callable | None = None):
+                 llm_backoff: float = 1.0, today: date | None = None, speaker_embedder: Callable | None = None,
+                 record_guideline: str = ''):
         self.store = store
         self.visit_id = store.visit_id
         # Random and per visit: the transcript rows of this visit carry it, and the replay route (mini/voice/replay.py)
@@ -104,6 +105,7 @@ class VisitSession:
         self.settings = deepcopy(settings)
         self.patient_text = patient_text
         self.record_template = record_template
+        self.record_guideline = record_guideline              # the physician's 更新方針, fixed for the visit like the templates
         self.analysis_template = analysis_template
         self.asr = asr
         self._on_change = on_change or (lambda: None)

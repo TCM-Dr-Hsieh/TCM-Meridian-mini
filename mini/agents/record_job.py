@@ -33,16 +33,21 @@ class ReviewOutput:
 
 def writer_user_prompt(patient: str, transcript: str, note: str, template: str,
                        rejected: list[tuple[str, 'ReviewOutput']], last_error: str | None, history: str = '',
-                       today: str = '') -> str:
+                       today: str = '', guideline: str = '') -> str:
     """`note` is what the operations apply to: the job's base version on the first write, and on every rewrite the
     version the reviewer just rejected (as in the original project), so earlier fixes are never undone and the
     reviewer's line numbers match what the writer sees. `rejected` holds every rejected version with its review.
-    `today` is the ready-made 【今日看診日期】 block (see `date_section`); it leads the prompt."""
+    `today` is the ready-made 【今日看診日期】 block (see `date_section`); it leads the prompt. `guideline` is the physician's
+    更新方針: blank means no such section; it goes after the template and before the reviewer's opinions."""
     parts = [today] if today else []
     parts += [patient_section(patient), section('逐字稿', transcript),
              section('病歷修改 diff 過程', history),
              section('今日病歷（附行號）', number_lines(note)),
              section('病歷模板', template or NO_RECORD_TEMPLATE)]
+    if guideline.strip():
+        parts.append(section('更新方針', guideline.strip()))
+        if not rejected:
+            parts.append('請根據以上方針，輸出你的修改操作。')
     if rejected:
         parts.append(section('歷次審查意見與被退件內容', rejected_history(rejected)))
         parts.append('請根據審查員的歷次意見，修改上方【今日病歷（附行號）】（即你上一輪被退件的版本）。輸出你的修改操作。')
@@ -101,6 +106,7 @@ async def run(session, job: Job):
     snap = session.pipeline.snapshot()
     patient = session.patient_text
     template = session.record_template
+    guideline = session.record_guideline
     required = settings.review.pass_required_n
     max_rounds = settings.review.max_review_rounds
     patient_version = session.patient_version
@@ -110,7 +116,7 @@ async def run(session, job: Job):
     session.log.emit('job_started', job_id=job.id, kind='record', base_index=session.note.current_index + 1,
                      base_snapshot_id=base_snapshot['id'], patient_version=patient_version, transcript_upto=snap.upto,
                      transcript_max_index=snap.max_index, unlocked=snap.unlocked, review_required=required,
-                     max_review_rounds=max_rounds,
+                     max_review_rounds=max_rounds, guideline=guideline,
                      **({'speaker_marks': snap.marked, 'speaker': session.speaker.role_summary()}
                         if session.speaker is not None else {}))
     writer_prompt = load_system_prompt(WRITER_PROMPT)
@@ -122,7 +128,7 @@ async def run(session, job: Job):
 
         def build(last_error):
             return messages(writer_prompt, writer_user_prompt(patient, snap.text, working, template,
-                                                              rejected, last_error, history, today))
+                                                              rejected, last_error, history, today, guideline))
 
         def validate(text: str) -> WriterOutput:
             try:

@@ -7,9 +7,10 @@ import pytest
 from nicegui import ui
 from nicegui.testing import User
 
-from mini.config import Settings
+from mini.config import TEMPLATES_DIR, Settings
 from mini.llm import LLMClient
 from mini.state import AppState, StateError
+from mini.ui.dialogs import GUIDELINE_WARNING, asks_to_leave_out
 from mini.ui.page import MainPage
 from mini.voice.remote import RemoteAudioSource
 from tests.helpers import FakeASR, FakeLLM, deid_reply, silent_source
@@ -741,6 +742,63 @@ async def test_the_settings_dialog_lists_the_deidentification_interface(user: Us
     await user.should_see('去識別化', retries=40)
     user.find('儲存設定').click()
     await until(lambda: 'deidentifier' in json.loads(state.config_path.read_text(encoding='utf-8'))['agents'])
+
+
+async def test_the_template_dialog_has_a_guideline_field_under_the_record_template(user: User, tmp_path):
+    state = build_state(tmp_path, FakeLLM())
+    (tmp_path / 'templates' / 'defaults' / 'record_guideline.txt').write_text('預設方針\n', encoding='utf-8')
+
+    @ui.page('/')
+    def index():
+        MainPage(state)
+
+    await user.open('/')
+    user.find('模板設定').click()
+    await user.should_see('病歷書寫方針', retries=40)
+    assert marked(user, 'guideline-warning').text == GUIDELINE_WARNING
+    record, guideline = marked(user, 'template-record'), marked(user, 'template-guideline')
+    assert guideline.value == ''
+    tabs_panel = next(a for a in guideline.ancestors() if isinstance(a, ui.tab_panel))
+    assert record in tabs_panel.descendants()                                           # same tab as the record template
+    restores = sorted((e for e in user.find('還原預設').elements if isinstance(e, ui.button)), key=lambda e: e.id)
+    guideline_restore = next(b for b in restores if b.id > guideline.id)
+    with user.client:
+        guideline_restore._handle_event({'listener_id': next(iter(guideline_restore._event_listeners)), 'args': {}})
+    await until(lambda: guideline.value == '預設方針\n')
+    assert record.value == state.get_template('record')                                 # each restore touches its own field
+    guideline.set_value('現病史依時間先後書寫')
+    user.find('儲存').click()
+    await until(lambda: state.get_template('guideline') == '現病史依時間先後書寫')
+
+
+@pytest.mark.parametrize('text,warned', [
+    ('不要寫過去病史', True), ('家族史不用列', True), ('不必記錄飲食', True), ('省略舌象', True), ('跳過個人史', True),
+    ('現病史依時間先後書寫', False), ('不要省略陰性症狀', False), ('不要寫成確定', False), ('', False),
+])
+def test_asks_to_leave_out(text, warned):
+    assert asks_to_leave_out(text) is warned
+
+
+def test_the_shipped_default_guideline_does_not_trigger_the_warning():
+    assert not asks_to_leave_out((TEMPLATES_DIR / 'defaults' / 'record_guideline.txt').read_text(encoding='utf-8'))
+
+
+@pytest.mark.parametrize('text,warned', [('不要寫過去病史', True), ('現病史依時間先後書寫', False)])
+async def test_saving_warns_when_the_guideline_asks_to_leave_something_out(user: User, tmp_path, text, warned):
+    state = build_state(tmp_path, FakeLLM())
+
+    @ui.page('/')
+    def index():
+        MainPage(state)
+
+    await user.open('/')
+    user.find('模板設定').click()
+    await user.should_see('病歷書寫方針', retries=40)
+    marked(user, 'template-guideline').set_value(text)
+    user.find('儲存').click()
+    await until(lambda: state.get_template('guideline') == text)              # the warning does not stop the save
+    await user.should_see('模板已儲存', retries=40)
+    assert user.notify.contains('方針看起來要求不寫某些內容') is warned
 
 
 # ============================ 患者資訊 floating panel =============================

@@ -80,6 +80,46 @@ async def test_review_failure_sends_comment_back_and_passes_accumulate_across_re
     assert h.session.note.get_current()['meta']['review']['rounds'] == 3
 
 
+async def test_the_guideline_goes_to_the_writer_after_the_template_and_before_the_opinions(make_session):
+    h = await make_session()
+    h.session.record_guideline = '現病史依時間先後書寫\n'
+    h.fake.queue('reviewer', FAIL, PASS, PASS)
+    h.fake.queue('writer', ops(insert('甲- 現病史：頭痛[語音#1]')), ops(replace(1, '甲- 現病史：頭痛三天[語音#1]')))
+    job = await h.run_job('record')
+    assert job.status == 'succeeded', job.message
+    first, second = (c[1]['content'] for c in h.fake.calls_for('writer'))
+    assert first.index('## 【病歷模板】') < first.index('## 【更新方針】\n現病史依時間先後書寫')
+    assert first.rstrip().endswith('請根據以上方針，輸出你的修改操作。')
+    # on a rewrite the task is the reviewer's opinions, so they come last and the closing line is theirs
+    assert second.index('## 【病歷模板】') < second.index('## 【更新方針】') < second.index('## 【歷次審查意見與被退件內容】')
+    assert '請根據以上方針' not in second
+    # the reviewer judges the note against the sources; it is not told the guideline
+    for call in h.fake.calls_for('reviewer'):
+        assert '更新方針' not in call[0]['content'] and '更新方針' not in call[1]['content']
+    assert next(e for e in h.session.log.events if e['type'] == 'job_started')['guideline'] == '現病史依時間先後書寫\n'
+
+
+@pytest.mark.parametrize('blank', ['', ' \n'])
+async def test_a_blank_guideline_sends_no_section(make_session, blank):
+    h = await make_session()
+    h.session.record_guideline = blank
+    await h.run_job('record')
+    user = h.fake.calls_for('writer')[0][1]['content']
+    assert '【更新方針】' not in user and '請根據以上方針' not in user
+
+
+async def test_the_writer_is_told_a_brief_guideline_does_not_excuse_a_careless_note(make_session):
+    h = await make_session()
+    await h.run_job('record')
+    writer = h.fake.calls_for('writer')[0][0]['content']
+    assert '如果發現【更新方針】過於簡略' in writer                                   # 主動補漏
+    assert '方針可以調整重點、順序、格式與詳略，但不能用來省略來源中已有的重要資訊或模板項目' in writer
+    assert '方針若要求不寫來源中已有的內容，這部分不要照做，仍要如實記錄，更不可改寫成「未知」或「尚未詢問」' in writer
+    assert '方針沒有提到的項目，也不代表可以省略' in writer
+    assert '方針裡的內容不可當成事實寫進病歷，也不可用方括號標籤引用' in writer       # it is an instruction, not a source
+    assert '兩者衝突時以這些規則為準' in writer
+
+
 async def test_a_rewrite_edits_the_version_the_reviewer_rejected_not_the_base(make_session):
     """Original behaviour: the rewrite's 今日病歷（附行號） is the rejected version, so the writer can locate the
     reviewer's quoted text on the current version and an earlier fix can never be undone by the next rewrite."""

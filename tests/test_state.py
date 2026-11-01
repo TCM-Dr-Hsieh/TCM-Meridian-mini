@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from mini.config import Settings
+from mini.config import TEMPLATES_DIR, Settings
 from mini.llm import LLMClient
 from mini.state import AppState, StateError
 from tests.helpers import FakeASR, FakeLLM, silent_source
@@ -72,6 +72,30 @@ async def test_global_settings_and_templates_are_locked_during_a_visit(app):
     with pytest.raises(StateError):
         app.save_template('record', 'x')
     await app.finish_visit()
+
+
+async def test_the_guideline_is_kept_like_a_template_and_fixed_when_the_visit_starts(app):
+    assert app.get_template('guideline') == ''                                          # no default file: nothing, no error
+    default = app.templates_dir / 'defaults' / 'record_guideline.txt'
+    default.write_text('預設方針\n', encoding='utf-8')
+    app.ensure_templates()
+    assert app.get_template('guideline') == app.default_template('guideline') == '預設方針\n'
+    app.save_template('guideline', '我的方針\n')
+    app.ensure_templates()
+    assert app.get_template('guideline') == '我的方針\n'                                 # a saved guideline is not overwritten
+    app.import_patient('x')
+    await app.start_visit()
+    assert app.visit.record_guideline == '我的方針\n'
+    with pytest.raises(StateError):
+        app.save_template('guideline', 'x')
+    await app.finish_visit()
+
+
+def test_the_shipped_default_guideline_is_a_plain_instruction():
+    text = (TEMPLATES_DIR / 'defaults' / 'record_guideline.txt').read_text(encoding='utf-8')
+    assert text.strip() and '[' not in text                                             # no source tag to copy
+    assert '【逐字稿】' in text and '【患者匯入資料】' in text and '【病歷模板】' in text    # sections the writer really gets
+    assert '不要新增模板沒有的項目' in text                                              # a custom template keeps its own fields
 
 
 async def test_invalid_settings_are_rejected_and_not_saved(app):

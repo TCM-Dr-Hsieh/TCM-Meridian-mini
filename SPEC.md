@@ -447,7 +447,7 @@ ReAct 主 Agent、教授 RAG、問診助理、低信心標註、病歷檢查員�
 
 ### 6.1 輸入
 
-**今日看診日期**（§8）、患者匯入資料、當前今日病歷（附行號）、逐字稿快照（§4.1）、病歷模板、**病歷修改 diff 過程**。
+**今日看診日期**（§8）、患者匯入資料、當前今日病歷（附行號）、逐字稿快照（§4.1）、病歷模板、**病歷修改 diff 過程**，以及有設定時的**更新方針**（§11.3）。
 
 「病歷修改 diff 過程」與原版 TCM-Meridian 相同：今日病歷從初始版本演進到目前版本的逐版本 NOTE unified diff，每個版本標題含來源（「醫師手動」／「病歷書寫 #k」／`init`）與時間；undo 後只算到目前停留的版本，被截斷的版本不在內。由 `mini/record/diff.py` 的 `build_diff_context` 產生，作業開始時固定。寫病歷 agent 與幻覺修正 agent **都**會收到它（區塊標題 `## 【病歷修改 diff 過程】`），用來理解既有內容如何形成、哪些是醫師手動修改，並核對 `[醫師手動]` 所指向的內容是否真的來自手動修改版本。
 
@@ -492,7 +492,7 @@ passes = 0；rounds = 0
 ### 6.4 寫病歷 agent（`prompt_update_record.txt`）
 
 以 TCM `prompt_record_update.txt` 為底，改寫為：
-- 資訊來源只有：逐字稿、病歷現況（含醫師手動行）、患者匯入資料、病歷模板。
+- 資訊來源只有：逐字稿、病歷現況（含醫師手動行）、患者匯入資料、病歷模板。【更新方針】是醫師的指示，不是臨床事實的來源：不可當成事實寫進病歷、不可用標籤引用，也不能放寬來源標註與幻覺規則。方針可以調整重點、順序、格式與詳略，但不能用來省略來源中已有的重要資訊或模板項目；方針沒提到的項目也不代表可以省略，方針過於簡略時書寫助理仍要主動補齊（【主動補漏】）。
 - 保留「七大醫療狀態」（陽性／陰性／疑似／未知／矛盾／變化／不適用，含原版的陰性三種寫法 reported／observed／verified、未知的「尚未取得」「無法取得」與新增的 (c)「部分回答」、(d)「檢查所見未口述」、矛盾與變化的區分）、「來源歸因」、「八大類幻覺禁令」（含 A-1～H-2 全部子類與範例）、「多來源衝突」與「主動補漏」；來源標籤改為 §5。七大狀態與八大類寫在共用檔 `prompts/shared_clinical_status.txt`、`prompts/shared_hallucination_categories.txt`，以 `{clinical_status}`、`{hallucination_categories}` 占位符引入寫病歷與幻覺修正兩份 prompt（原版是在兩份 prompt 各抄一份；共用檔確保兩邊字句相同、不會漂移）。共用的只放**與角色無關的定義與範例**：同一條「模糊描述過度專業化」的定義，對寫的人是「不要這樣寫」、對審的人是「這樣要退件」，字句不必也不應不同；類別代碼兩邊都要有（審查員在 `comment` 中指出 A-1～H-2 類別，書寫助理要看得懂審查意見裡的類別代碼）。**因角色而異的框架語氣留在各自的 prompt 本文**：書寫助理端是「寫入前自行逐類檢查」、審查員端是「審查重點」與「合理整理與歸納視為合格」的寬容指引，以及審查員專屬的「正確寫法標準」說明與來源歸因原則。共用檔內不放任何只對單一角色說的句子（例如「判定為合格／退件」）。新增逐字稿無說話者標示下的調整：醫師當場說出的舌象、脈象、檢查所見是「醫師檢查所見」，不是患者自述。
 - **首次書寫**（今日病歷為空）：依模板逐項產生，**所有模板項目都要出現**（問診類資訊未取得者寫「未知（尚未詢問）」；問診以外的檢查所見——舌象、脈象、血壓…——逐字稿沒有口述者寫「未知（未口述，待醫師輸入）」，見 §20.5），欄位提示括號不照抄；之後的書寫以行級修改為主。
 - 不得遺漏重要資訊、不得誤刪既有內容、不得抹平衝突（並列待確認）。
@@ -664,7 +664,7 @@ passes = 0；rounds = 0
 
 ### 11.3 模板設定視窗（看診中鎖定）
 
-兩個分頁：病歷模板、分析模板（文字框、儲存、還原預設）。檔案 `templates/record_template.txt`、`templates/analysis_template.txt`，預設為你提供的內容原樣（不含 `[病歷模板]`／`[分析模板]` 標題行）。分析模板留空 → 教授自由發揮；病歷模板留空 → 寫病歷 agent 自由書寫。預設病歷模板含「請實習醫師現場執行」等字句，本系統沒有該角色，LLM 會寫成「未知（未口述，待醫師輸入）」（未知 (d)，見 §20.5），屬預期。
+兩個分頁：病歷模板、分析模板（文字框、儲存、還原預設）。病歷模板分頁下方另有**病歷書寫方針**欄位（檔案 `templates/record_guideline.txt`，同樣有 `defaults/` 預設副本與還原預設）：看診開始時固定（`VisitSession.record_guideline`，看診中不能改），每次病歷書寫都以【更新方針】一段放在病歷模板之後、審查意見之前，記在 `job_started` 的 `guideline`。留空就不送這一段，這和模板不同（病歷與分析模板留空是自由發揮）；書寫助理 system prompt 裡說明方針的第 7 項與【主動補漏】的「方針過於簡略」仍然存在，所以留空不完全等於加入方針之前的行為。預設樣本以模板已有的項目為範圍，要求不新增模板沒有的項目。方針只給書寫助理，幻覺審查員的輸入不變。檔案 `templates/record_template.txt`、`templates/analysis_template.txt`，預設為你提供的內容原樣（不含 `[病歷模板]`／`[分析模板]` 標題行）。分析模板留空 → 教授自由發揮；病歷模板留空 → 寫病歷 agent 自由書寫。預設病歷模板含「請實習醫師現場執行」等字句，本系統沒有該角色，LLM 會寫成「未知（未口述，待醫師輸入）」（未知 (d)，見 §20.5），屬預期。
 
 ## 12. 存檔與稽核
 
@@ -752,7 +752,7 @@ TCM-Meridian-mini/
 ├── app.py                      NiceGUI 啟動（預設 0.0.0.0:5050；環境變數 MINI_HOST、MINI_PORT 可改，§2.1）
 ├── requirements*.txt、constraints.txt、setup.ps1、install.cmd、start.cmd、pytest.ini、.gitignore
 ├── config.json                 （自動生成，gitignore）
-├── templates/                  record_template.txt、analysis_template.txt
+├── templates/                  record_template.txt、analysis_template.txt、record_guideline.txt
 ├── prompts/                    prompt_transcript_corrector / prompt_update_record / prompt_hallucination_corrector
 │                               prompt_ai_advice / prompt_analysis / prompt_cross_review / prompt_arbitration
 │                               prompt_de_identification、prompt_speaker_roles / prompt_speaker_fill
@@ -851,7 +851,7 @@ TCM-Meridian-mini/
 ```text
 app.py、conftest.py、pytest.ini、requirements*.txt、constraints.txt、setup.ps1、install.cmd、start.cmd、README.md、SPEC.md、LICENSE、NOTICE
 prompts/        十份 prompt 檔（八份角色 prompt＋兩份共用區塊）
-templates/      病歷與分析模板（defaults/ 為預設副本）
+templates/      病歷模板、分析模板、病歷書寫方針（defaults/ 為預設副本）
 mini/           config.py state.py visit.py visit_store.py jobs.py fileio.py textutil.py
 mini/llm/       client.py scheduler.py calls.py
 mini/voice/     audio.py remote.py asr.py asr_worker.py alignment.py editing.py corrector.py pipeline.py
@@ -1374,3 +1374,5 @@ tests/          178 項測試（假 LLM／假 ASR／假麥克風＋NiceGUI user 
 - **限制**：沒有用真實 ASR 重播（對齊器的輸出是合成的，形狀取自 voice_to_text 量到的視窗）；放寬後的 0.8 秒上限來自 voice_to_text 的 49 個視窗，沒有 mini 自己的資料可以驗證。
 
 **審查員的「一次列完」規則撤回（使用者 2026-10-22）**：使用者發現原版（TCM-Meridian）的幻覺審查通常 3～4 輪通過，輕量版要更多輪。比對後，兩邊的模型與審查設定相同，差異在審查員的 prompt。以使用者的資料做過對照實驗與完整流程重播後，撤回審查員「一次列完所有問題，且每個出現的位置都要列」一條，輸出格式的「`comment` 必須一次列完問題類別」改為「列出問題類別」：這條原本是為了少跑幾輪而加的（見本節「針對根因二的 prompt 改善」(i)），實際上讓輪數與失敗變多，最後病歷的品質沒有變好。也試過依原版逐段改寫成輕量版的審查員，輪數接近原版，但放過的錯誤較多，不採用。書寫助理的「修正一處時同步檢查同一事實的所有位置」不變。`tests/test_jobs.py` 原本固定這條規則的斷言改為固定它已撤回；全部測試、`ruff` 與 `git diff --check` 通過。
+
+**病歷書寫方針（使用者 2026-11-01）**：使用者希望醫師能針對性地調整書寫助理的輸出，要求在病歷模板開一個輸入方針的欄位、給預設樣本，並保留「方針太簡略時書寫助理要主動補齊」的概念。作法比照原版主 Agent 給書寫助理的「更新方針」：`templates/record_guideline.txt`（§11.3），以 `【更新方針】` 一段接在病歷模板之後、審查意見之前；留空不送。`prompt_update_record.txt` 的【主動補漏】加上「方針過於簡略」，資訊來源多一項說明方針不是臨床事實來源、不能放寬規則。實驗結果並不一致：一輪中由程式列出逐字稿範圍與模板欄位的方針讓第一版遺漏較少，但經過審查迴圈後，最後的病歷與輪數沒有可見差異；另一輪用新的 prompt 比較預設方針與留空，第一版的遺漏也沒有差別。使用者仍採用，目的是讓醫師能控制輸出，不是為了減少遺漏或輪數。審查員維持 V1，看不到方針。外部審查指出，原本「方針決定要寫什麼」與【完整登載】矛盾，要求「不寫某項」時結果不確定，使用者選擇保守方案：方針只能調整重點、順序、格式與詳略，不能用來省略來源中已有的重要資訊或模板項目。預設樣本也改成以模板已有的項目為範圍。**已知限制**：實測方針寫「不要寫某項」時，模型仍可能把有資料的項目改寫成「未知」，等於記錄不實；prompt 明文禁止後沒有可見改善，審查員看不到方針，也不一定退件。換掉方針後面的收尾句、改成固定的限制句，也沒有觀察到明顯差異。所以這條規則不是保證，模板視窗與 README 都寫明這個風險；方針裡出現「不要寫」「省略」這類字樣時，儲存後會跳出警告（`asks_to_leave_out`，只比對字面，「不要省略」「不要寫成」不算，不阻擋儲存，因為關鍵字分不出好的方針）。模板視窗的分頁區塊改為可捲動（Quasar 預設 `overflow: hidden`，兩個欄位在較矮的視窗會切到下方內容且滾輪捲不到）。測試：方針在書寫輸入中的位置（首次與重寫）、留空不送、審查員收不到、`job_started` 紀錄、看診中鎖定與開始時固定、預設檔不覆蓋已存內容、模板視窗的欄位與還原預設。

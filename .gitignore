@@ -9,6 +9,7 @@ data/
 *.log
 templates/record_template.txt
 templates/analysis_template.txt
+templates/record_guideline.txt
 models/
 setup.log
 .ruff_cache/

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -15,6 +16,17 @@ from ..speaker import DOCTOR, OTHER, UNKNOWN, tuning
 from ..speaker.embedder import availability
 from ..state import AppState, StateError, TEMPLATE_LABELS
 from ..voice.asr import validate_model_dir
+
+
+GUIDELINE_WARNING = '請不要用方針要求「不要寫某項」：模型可能把有資料的項目改寫成「未知」，審查員也不一定攔得下來。'
+# Only for the warning on save, so a wrong hit costs one message: a phrasing outside this list is not caught, and a request
+# NOT to leave something out, or not to write something as certain, is a good guideline.
+_KEEP_IT = re.compile(r'(?:不要|不可|不得|不能|勿|避免)(?:省略|略過|跳過|刪除|刪掉|移除|遺漏)')
+_LEAVE_IT_OUT = re.compile(r'(?:不要|不用|不必|不需要?|別|勿)(?:寫(?!成)|記錄|列)|省略|略過|跳過|刪除|刪掉|移除')
+
+
+def asks_to_leave_out(guideline: str) -> bool:
+    return bool(_LEAVE_IT_OUT.search(_KEEP_IT.sub('', guideline)))
 
 
 async def copy_to_clipboard(text: str, what: str, *, caution: str = '') -> bool:
@@ -92,20 +104,33 @@ def open_template_dialog(app: AppState):
     dialog = ui.dialog().props('persistent')
     with dialog, ui.card().classes('w-[860px] max-w-full gap-3'):
         ui.label('模板設定').classes('text-xl font-semibold')
-        ui.label('病歷模板決定寫病歷 agent 的輸出格式；分析模板決定整體分析的 A&T 格式。留空代表自由發揮。').classes('hint')
+        ui.label('病歷模板決定寫病歷 agent 的輸出格式，分析模板決定整體分析的 A&T 格式，留空代表自由發揮；病歷書寫方針告訴 agent 要注意什麼，留空就不送。') \
+            .classes('hint')
         with ui.tabs().classes('w-full') as tabs:
             tab_objs = {kind: ui.tab(label) for kind, label in TEMPLATE_LABELS.items()}
-        with ui.tab_panels(tabs, value=tab_objs['record']).classes('w-full'):
+        # two fields do not fit a short window: the panels scroll (Quasar's default would clip them, out of the wheel's reach)
+        with ui.tab_panels(tabs, value=tab_objs['record']).classes('w-full').style('overflow-y:auto'):
+            def field(kind: str, height: int):
+                areas[kind] = ui.textarea(value=app.get_template(kind)).mark(f'template-{kind}') \
+                    .props(f'outlined input-style="height:{height}px; font-family:Consolas,monospace"').classes('w-full')
+
+                def restore():
+                    areas[kind].set_value(app.default_template(kind))
+                    ui.notify('已載入預設內容，按「儲存」才會生效。')
+
+                ui.button('還原預設', on_click=restore).props('flat')
+
             for kind in TEMPLATE_LABELS:
                 with ui.tab_panel(tab_objs[kind]).classes('p-0 gap-2'):
-                    areas[kind] = ui.textarea(value=app.get_template(kind)) \
-                        .props('outlined input-style="height:420px; font-family:Consolas,monospace"').classes('w-full')
-
-                    def restore(k=kind):
-                        areas[k].set_value(app.default_template(k))
-                        ui.notify('已載入預設內容，按「儲存」才會生效。')
-
-                    ui.button('還原預設', on_click=restore).props('flat')
+                    if kind != 'record':
+                        field(kind, 420)
+                        continue
+                    field(kind, 300)
+                    ui.label('病歷書寫方針').classes('font-semibold')
+                    ui.label('每次病歷書寫都會送給寫病歷 agent，可以調整重點、順序、格式與詳略（例如「現病史依時間先後書寫」）。'
+                             '方針太簡略時，agent 仍會自行補齊；來源標註與幻覺審查的標準不會因方針而放寬。留空就不送。').classes('hint')
+                    ui.label(GUIDELINE_WARNING).classes('text-red-700 text-sm').mark('guideline-warning')
+                    field('guideline', 110)
         error = ui.label('').classes('text-red-700 text-sm')
 
         def save():
@@ -117,6 +142,8 @@ def open_template_dialog(app: AppState):
                 return
             dialog.close()
             ui.notify('模板已儲存。', type='positive')
+            if asks_to_leave_out(areas['guideline'].value or ''):
+                ui.notify('方針看起來要求不寫某些內容。' + GUIDELINE_WARNING, type='warning', multi_line=True, close_button='關閉', timeout=0)
 
         with ui.row().classes('w-full justify-end'):
             ui.button('取消', on_click=dialog.close).props('flat')

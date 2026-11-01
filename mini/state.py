@@ -14,7 +14,7 @@ from .visit_store import VisitStore
 from .voice.asr import ASRError, LocalASR, validate_model_dir
 from .voice.remote import RemoteAudioSource
 
-TEMPLATE_FILES = {'record': 'record_template.txt', 'analysis': 'analysis_template.txt'}
+TEMPLATE_FILES = {'record': 'record_template.txt', 'analysis': 'analysis_template.txt', 'guideline': 'record_guideline.txt'}
 TEMPLATE_LABELS = {'record': '病歷模板', 'analysis': '分析模板'}
 SCRIPT_MODES = ('original', 'simplified', 'traditional')
 
@@ -200,6 +200,7 @@ class AppState:
             store = VisitStore.allocate(self.settings.visits_path())
             visit = VisitSession(store=store, settings=self.settings, patient_text=self.patient_text,
                                  record_template=self.get_template('record'),
+                                 record_guideline=self.get_template('guideline'),
                                  analysis_template=self.get_template('analysis'), client=self.client,
                                  scheduler=self.scheduler, asr=self.asr, on_change=self.bump,
                                  source_factory=source_factory, llm_backoff=self._llm_backoff,
